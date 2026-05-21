@@ -1,13 +1,18 @@
 import cv2
 import numpy as np
+from PIL import Image
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.units import mm
+import os
+
+
+ID_CARD_RATIO = 85.6 / 54.0
 
 
 def order_points(pts):
-    """
-    将四个点排序为：
-    左上、右上、右下、左下
-    """
-    rect = np.zeros((4, 2), dtype="float32")
+    pts = np.asarray(pts, dtype=np.float32)
+    rect = np.zeros((4, 2), dtype=np.float32)
 
     s = pts.sum(axis=1)
     rect[0] = pts[np.argmin(s)]   # 左上
@@ -20,74 +25,316 @@ def order_points(pts):
     return rect
 
 
-def four_point_transform(image, pts):
+def line_intersection(line1, line2):
+    vx1, vy1, x1, y1 = line1
+    vx2, vy2, x2, y2 = line2
+
+    A = np.array([[vx1, -vx2], [vy1, -vy2]], dtype=np.float64)
+    b = np.array([x2 - x1, y2 - y1], dtype=np.float64)
+
+    det = np.linalg.det(A)
+    if abs(det) < 1e-6:
+        return None
+
+    t, _ = np.linalg.solve(A, b)
+    return np.array([x1 + t * vx1, y1 + t * vy1], dtype=np.float32)
+
+
+def overlap_len(a1, a2, b1, b2):
+    return max(0.0, min(a2, b2) - max(a1, b1))
+
+
+import math
+
+
+def detect_card_by_hough(image):
+    h, w = image.shape[:2]
+
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 降噪，同时保留边缘
+    gray = cv2.bilateralFilter(gray, 9, 75, 75)
+
+    # 增强局部对比度
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    v = np.median(gray)
+    lower = int(max(0, 0.66 * v))
+    upper = int(min(255, 1.33 * v))
+
+    edges = cv2.Canny(gray, lower, upper)
+
+    lines = cv2.HoughLinesP(
+        edges,
+        rho=1,
+        theta=np.pi / 180,
+        threshold=max(35, int(min(w, h) * 0.08)),
+        minLineLength=int(min(w, h) * 0.20),
+        maxLineGap=int(min(w, h) * 0.06),
+    )
+
+    if lines is None:
+        raise RuntimeError("没有检测到足够的直线边缘。")
+
+    def cluster_lines(orientation):
+        angle_tol = 25
+        cluster_dist = max(10, int(min(w, h) * 0.025))
+
+        segs = []
+
+        for line in lines[:, 0]:
+            x1, y1, x2, y2 = map(float, line)
+
+            dx = x2 - x1
+            dy = y2 - y1
+            length = math.hypot(dx, dy)
+
+            angle = math.degrees(math.atan2(dy, dx))
+            angle = ((angle + 90) % 180) - 90
+
+            if orientation == "h":
+                if abs(angle) > angle_tol:
+                    continue
+
+                if length < w * 0.14:
+                    continue
+
+                coord = (y1 + y2) / 2
+                span1 = min(x1, x2)
+                span2 = max(x1, x2)
+
+            else:
+                if abs(abs(angle) - 90) > angle_tol:
+                    continue
+
+                if length < h * 0.14:
+                    continue
+
+                coord = (x1 + x2) / 2
+                span1 = min(y1, y2)
+                span2 = max(y1, y2)
+
+            segs.append((coord, span1, span2, length, (x1, y1, x2, y2)))
+
+        segs.sort(key=lambda item: item[0])
+
+        clusters = []
+
+        for seg in segs:
+            coord, span1, span2, length, points = seg
+            target = None
+
+            for c in clusters:
+                if abs(coord - c["coord"]) <= cluster_dist:
+                    target = c
+                    break
+
+            if target is None:
+                clusters.append({
+                    "coord": coord,
+                    "minspan": span1,
+                    "maxspan": span2,
+                    "length": length,
+                    "items": [seg],
+                })
+            else:
+                target["items"].append(seg)
+
+                total = sum(item[3] for item in target["items"])
+
+                target["coord"] = sum(item[0] * item[3] for item in target["items"]) / total
+                target["minspan"] = min(item[1] for item in target["items"])
+                target["maxspan"] = max(item[2] for item in target["items"])
+                target["length"] = total
+
+        # 每一组线段拟合成一条直线
+        for c in clusters:
+            pts = []
+
+            for item in c["items"]:
+                x1, y1, x2, y2 = item[4]
+                pts.append([x1, y1])
+                pts.append([x2, y2])
+
+            pts = np.array(pts, dtype=np.float32)
+
+            vx, vy, x0, y0 = cv2.fitLine(
+                pts,
+                cv2.DIST_L2,
+                0,
+                0.01,
+                0.01,
+            ).flatten()
+
+            c["line"] = (float(vx), float(vy), float(x0), float(y0))
+
+        return clusters
+
+    h_lines = cluster_lines("h")
+    v_lines = cluster_lines("v")
+
+    candidates = []
+    img_area = w * h
+
+    for top in h_lines:
+        for bottom in h_lines:
+            if bottom["coord"] <= top["coord"]:
+                continue
+
+            for left in v_lines:
+                for right in v_lines:
+                    if right["coord"] <= left["coord"]:
+                        continue
+
+                    tl = line_intersection(top["line"], left["line"])
+                    tr = line_intersection(top["line"], right["line"])
+                    br = line_intersection(bottom["line"], right["line"])
+                    bl = line_intersection(bottom["line"], left["line"])
+
+                    if any(p is None for p in [tl, tr, br, bl]):
+                        continue
+
+                    pts = np.array([tl, tr, br, bl], dtype=np.float32)
+
+                    if not np.all(np.isfinite(pts)):
+                        continue
+
+                    width_top = np.linalg.norm(tr - tl)
+                    width_bottom = np.linalg.norm(br - bl)
+                    height_left = np.linalg.norm(bl - tl)
+                    height_right = np.linalg.norm(br - tr)
+
+                    avg_width = (width_top + width_bottom) / 2
+                    avg_height = (height_left + height_right) / 2
+
+                    if avg_width <= 0 or avg_height <= 0:
+                        continue
+
+                    ratio = max(avg_width, avg_height) / min(avg_width, avg_height)
+
+                    if not 1.25 <= ratio <= 2.05:
+                        continue
+
+                    area = abs(cv2.contourArea(pts))
+
+                    if area < img_area * 0.05 or area > img_area * 0.85:
+                        continue
+
+                    x_min, y_min = pts.min(axis=0)
+                    x_max, y_max = pts.max(axis=0)
+
+                    edge_margin = min(w, h) * 0.02
+                    touch_count = 0
+                    touch_count += int(x_min <= edge_margin)
+                    touch_count += int(y_min <= edge_margin)
+                    touch_count += int((w - x_max) <= edge_margin)
+                    touch_count += int((h - y_max) <= edge_margin)
+
+                    # 防止把整张图片外边界误判成身份证
+                    if touch_count >= 2 and area > img_area * 0.60:
+                        continue
+
+                    top_cov = overlap_len(
+                        top["minspan"],
+                        top["maxspan"],
+                        min(tl[0], tr[0]),
+                        max(tl[0], tr[0]),
+                    ) / max(avg_width, 1)
+
+                    bottom_cov = overlap_len(
+                        bottom["minspan"],
+                        bottom["maxspan"],
+                        min(bl[0], br[0]),
+                        max(bl[0], br[0]),
+                    ) / max(avg_width, 1)
+
+                    left_cov = overlap_len(
+                        left["minspan"],
+                        left["maxspan"],
+                        min(tl[1], bl[1]),
+                        max(tl[1], bl[1]),
+                    ) / max(avg_height, 1)
+
+                    right_cov = overlap_len(
+                        right["minspan"],
+                        right["maxspan"],
+                        min(tr[1], br[1]),
+                        max(tr[1], br[1]),
+                    ) / max(avg_height, 1)
+
+                    if min(top_cov, bottom_cov, left_cov, right_cov) < 0.18:
+                        continue
+
+                    ratio_score = max(0.0, 1 - abs(ratio - ID_CARD_RATIO) / ID_CARD_RATIO)
+                    coverage_score = (top_cov + bottom_cov + left_cov + right_cov) / 4
+
+                    score = area * ratio_score * coverage_score
+
+                    candidates.append((score, pts))
+
+    if not candidates:
+        raise RuntimeError(
+            f"没有找到身份证矩形。检测到横线组 {len(h_lines)} 个，竖线组 {len(v_lines)} 个。"
+        )
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+
+    best_pts = order_points(candidates[0][1])
+
+    best_pts[:, 0] = np.clip(best_pts[:, 0], 0, w - 1)
+    best_pts[:, 1] = np.clip(best_pts[:, 1], 0, h - 1)
+
+    return best_pts
+
+
+def perspective_correct(image, pts, output_width=1011):
     rect = order_points(pts)
 
     tl, tr, br, bl = rect
 
-    width_a = np.linalg.norm(br - bl)
-    width_b = np.linalg.norm(tr - tl)
-    max_width = int(max(width_a, width_b))
+    width = (np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2
+    height = (np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2
 
-    height_a = np.linalg.norm(tr - br)
-    height_b = np.linalg.norm(tl - bl)
-    max_height = int(max(height_a, height_b))
+    # 如果身份证是竖着拍的，调整点顺序，让输出仍然是横向
+    if width < height:
+        rect = np.array([bl, tl, tr, br], dtype=np.float32)
+
+    output_height = int(round(output_width / ID_CARD_RATIO))
 
     dst = np.array([
         [0, 0],
-        [max_width - 1, 0],
-        [max_width - 1, max_height - 1],
-        [0, max_height - 1]
-    ], dtype="float32")
+        [output_width - 1, 0],
+        [output_width - 1, output_height - 1],
+        [0, output_height - 1],
+    ], dtype=np.float32)
 
-    matrix = cv2.getPerspectiveTransform(rect, dst)
-    warped = cv2.warpPerspective(image, matrix, (max_width, max_height))
+    M = cv2.getPerspectiveTransform(rect, dst)
+
+    warped = cv2.warpPerspective(
+        image,
+        M,
+        (output_width, output_height),
+        flags=cv2.INTER_CUBIC,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
 
     return warped
 
 
-ID_CARD_RATIO = 85.6 / 54.0
+def crop_inner_margin(image, margin_ratio=0.004):
+    h, w = image.shape[:2]
+
+    mx = int(w * margin_ratio)
+    my = int(h * margin_ratio)
+
+    if mx <= 0 or my <= 0:
+        return image
+
+    return image[my:h - my, mx:w - mx]
 
 
-def expand_to_id_card_rect(x, y, w, h, img_w, img_h):
-    """Expand a foreground box to the standard ID-card ratio."""
-    pad = 0.01
-    width = w * (1 + pad * 2)
-    height = h * (1 + pad * 2)
-
-    if width / height > ID_CARD_RATIO:
-        height = width / ID_CARD_RATIO
-    else:
-        width = height * ID_CARD_RATIO
-
-    cx = x + w / 2
-    left = int(round(cx - width / 2))
-    top = int(round(y - h * pad))
-
-    if left < 0:
-        left = 0
-    if top < 0:
-        top = 0
-    if left + width > img_w:
-        left = max(0, int(round(img_w - width)))
-    if top + height > img_h:
-        top = max(0, int(round(img_h - height)))
-
-    width = min(img_w - left, int(round(width)))
-    height = min(img_h - top, int(round(height)))
-    return left, top, width, height
-
-
-def shrink_quad(pts, factor=0.985):
-    """将4个角点向中心收缩指定的比例，默认收缩1.5%"""
-    center = np.mean(pts, axis=0)
-    shrunk = []
-    for pt in pts:
-        shrunk.append(center + (pt - center) * factor)
-    return np.array(shrunk, dtype="float32")
-
-
-def add_white_border(image, thickness=8):
+def add_white_border(image, thickness=16):
     """给图像边缘绘制一圈纯白色边框，遮盖任何残存的细微毛边"""
     h, w = image.shape[:2]
     # 绘制纯白色矩形边框覆盖边缘 (thickness * 2 像素线宽)
@@ -95,219 +342,187 @@ def add_white_border(image, thickness=8):
     return image
 
 
-def crop_by_grabcut(image):
-    """Segment the card from busy fabric backgrounds before contour fallback."""
-    img_h, img_w = image.shape[:2]
-    img_area = img_h * img_w
-    margin = 0.08
-    rect = (
-        int(img_w * margin),
-        int(img_h * margin),
-        int(img_w * (1 - 2 * margin)),
-        int(img_h * (1 - 2 * margin)),
-    )
-
-    mask = np.zeros((img_h, img_w), np.uint8)
-    bg_model = np.zeros((1, 65), np.float64)
-    fg_model = np.zeros((1, 65), np.float64)
-
-    try:
-        cv2.grabCut(image, mask, rect, bg_model, fg_model, 3, cv2.GC_INIT_WITH_RECT)
-    except cv2.error:
-        return None
-
-    foreground = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype("uint8")
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
-    foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, kernel)
-    foreground = cv2.morphologyEx(
-        foreground,
-        cv2.MORPH_OPEN,
-        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
-    )
-
-    contours, _ = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    candidates = []
-
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        if area < img_area * 0.10 or area > img_area * 0.80:
-            continue
-
-        x, y, w, h = cv2.boundingRect(cnt)
-        if w == 0 or h == 0:
-            continue
-
-        ratio = max(w, h) / min(w, h)
-        if 1.30 <= ratio <= 2.05:
-            score = area * (1.0 - abs(ratio - ID_CARD_RATIO) / ID_CARD_RATIO)
-            candidates.append((score, x, y, w, h))
-
-    if not candidates:
-        return None
-
-    _, x, y, w, h = sorted(candidates, reverse=True, key=lambda item: item[0])[0]
-    
-    # 先规范扩展到标准身份证比例
-    x, y, w, h = expand_to_id_card_rect(x, y, w, h, img_w, img_h)
-    
-    # 接着对已符合标准比例的包围盒进行等比强力收缩 3.5%，防阻边缘杂色
-    inset_px_w = int(w * 0.035)
-    inset_px_h = int(h * 0.035)
-    x += inset_px_w
-    y += inset_px_h
-    w -= inset_px_w * 2
-    h -= inset_px_h * 2
-
-    if w <= 0 or h <= 0:
-        return None
-
-    return image[y:y + h, x:x + w]
-
-
 def crop_id_card(image_path, output_path="id_card_crop.jpg", debug=False):
     image = cv2.imread(image_path)
     if image is None:
         raise ValueError("图片读取失败")
 
-    grabcut_crop = crop_by_grabcut(image)
-    if grabcut_crop is not None:
-        if debug:
-            print("成功使用 GrabCut 前景分割定位身份证主体")
-        # 统一缩放到高清晰度尺寸并增加白边 (thickness=16, 覆盖 16 像素，线宽 32)
-        cleaned_resized = cv2.resize(grabcut_crop, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
-        cleaned_resized = add_white_border(cleaned_resized, thickness=16)
-        cv2.imwrite(output_path, cleaned_resized)
+    try:
+        pts = detect_card_by_hough(image)
+        # 采用 Hough 变换精确定位边缘并进行 3D 透视变换与内缩边缘裁剪
+        corrected = perspective_correct(image, pts, output_width=1063)
+        corrected = crop_inner_margin(corrected, margin_ratio=0.004)
+        corrected = add_white_border(corrected, thickness=16)
+
+        cv2.imwrite(output_path, corrected)
         return output_path
+    except Exception as e:
+        raise ValueError(f"未检测到身份证边框: {e}")
 
-    original = image.copy()
-    img_area = image.shape[0] * image.shape[1]
 
-    # 1. 灰度化
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
-    # 2. 自适应直方图均衡化，增强对比度
+def enhance_image_quality(image):
+    """增强图像质量：锐化、降噪、对比度优化"""
+    # 转换为LAB色彩空间进行处理
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    
+    # 对L通道应用CLAHE增强对比度
     clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    gray = clahe.apply(gray)
+    l = clahe.apply(l)
+    
+    # 合并通道
+    enhanced_lab = cv2.merge([l, a, b])
+    enhanced = cv2.cvtColor(enhanced_lab, cv2.COLOR_LAB2BGR)
+    
+    # 轻微锐化
+    kernel = np.array([[-1,-1,-1],
+                       [-1, 9,-1],
+                       [-1,-1,-1]]) * 0.5
+    sharpened = cv2.filter2D(enhanced, -1, kernel)
+    
+    # 双边滤波降噪但保留边缘
+    result = cv2.bilateralFilter(sharpened, 5, 50, 50)
+    
+    return result
 
-    # 3. 去噪
-    blur = cv2.GaussianBlur(gray, (5, 5), 0)
 
-    # 4. 多种边缘检测方法并合并，获得极高的召回率
-    edges1 = cv2.Canny(blur, 30, 100)
-    edges2 = cv2.Canny(blur, 50, 150)
-    edges3 = cv2.Canny(blur, 75, 200)
-    edges_base = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
+def create_id_card_pdf(front_image_path, back_image_path, output_pdf="身份证复印件.pdf"):
+    """
+    将身份证正反面图片生成为A4 PDF文件
+    
+    参数:
+        front_image_path: 正面图片路径
+        back_image_path: 反面图片路径
+        output_pdf: 输出PDF文件名
+    """
+    # A4纸张尺寸 (210mm x 297mm)
+    page_width, page_height = A4
+    
+    # 创建PDF
+    c = canvas.Canvas(output_pdf, pagesize=A4)
+    
+    # 身份证标准尺寸 85.6mm x 54mm，放大到合适的打印尺寸
+    card_width = 160 * mm  # 放大到160mm宽
+    card_height = card_width / 1.586  # 保持标准比例
+    
+    # 计算居中位置
+    x_center = (page_width - card_width) / 2
+    
+    # 正面放在上半部分
+    y_front = page_height - 80 * mm - card_height
+    
+    # 反面放在下半部分
+    y_back = 80 * mm
+    
+    # 添加正面图片
+    if os.path.exists(front_image_path):
+        c.drawImage(front_image_path, x_center, y_front, 
+                   width=card_width, height=card_height, 
+                   preserveAspectRatio=True)
+        # 添加标注
+        c.setFont("Helvetica", 10)
+        c.drawString(x_center, y_front + card_height + 5 * mm, "身份证正面")
+    
+    # 添加反面图片
+    if os.path.exists(back_image_path):
+        c.drawImage(back_image_path, x_center, y_back, 
+                   width=card_width, height=card_height, 
+                   preserveAspectRatio=True)
+        # 添加标注
+        c.setFont("Helvetica", 10)
+        c.drawString(x_center, y_back + card_height + 5 * mm, "身份证反面")
+    
+    # 保存PDF
+    c.save()
+    print(f"PDF已生成: {output_pdf}")
+    return output_pdf
 
-    # 自适应形态学参数组合，防止床单等高噪声背景下边缘和主体粘连导致定位失败
-    parameter_combos = [
-        # (morph_size, dilate_size, dilate_iter)
-        (3, 2, 1),
-        (3, 3, 0),
-        (5, 5, 0),
-        (3, 3, 1),
-    ]
 
-    best_candidate = None
-    winning_combo = None
-
-    for morph_size, dilate_size, dilate_iter in parameter_combos:
-        edges = edges_base.copy()
-        if morph_size > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (morph_size, morph_size))
-            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-        if dilate_iter > 0:
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (dilate_size, dilate_size))
-            edges = cv2.dilate(edges, kernel, iterations=dilate_iter)
-
-        if debug:
-            cv2.imwrite(f"debug_edges_m{morph_size}_d{dilate_iter}.jpg", edges)
-
-        # 6. 使用 RETR_LIST 查找轮廓，确保能够检索到被包裹在闭合图片边界内的身份证轮廓
-        contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-
-        candidates = []
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-
-            # 限制轮廓面积并拒绝贴边整图外框，避免把照片边界误判为身份证
-            if area < img_area * 0.03 or area > img_area * 0.80:
-                continue
-
-            # 多边形拟合
-            peri = cv2.arcLength(cnt, True)
-            for epsilon_factor in [0.02, 0.03, 0.04, 0.05]:
-                approx = cv2.approxPolyDP(cnt, epsilon_factor * peri, True)
-                
-                if 4 <= len(approx) <= 6:
-                    if len(approx) > 4:
-                        rect = cv2.minAreaRect(cnt)
-                        box = cv2.boxPoints(rect)
-                        pts = np.intp(box)
-                    else:
-                        pts = approx.reshape(-1, 2)
-
-                    x, y, w, h = cv2.boundingRect(pts)
-                    touches_frame = x <= 2 or y <= 2 or x + w >= image.shape[1] - 2 or y + h >= image.shape[0] - 2
-                    if touches_frame:
-                        continue
-                    if w == 0 or h == 0:
-                        continue
-                        
-                    ratio = max(w, h) / min(w, h)
-
-                    # 放宽比例限制到 1.3 - 2.0 提升抗形变能力
-                    if 1.3 <= ratio <= 2.0:
-                        score = area * (1.0 - abs(ratio - 1.586) / 1.586)
-                        candidates.append((score, area, ratio, pts))
-                        break
-
-        if candidates:
-            candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
-            # 只有当最好候选者的面积占图像面积 10% 以上时才采纳，排除细碎噪声
-            if candidates[0][1] >= img_area * 0.10:
-                best_candidate = candidates[0]
-                winning_combo = (morph_size, dilate_size, dilate_iter)
-                break
-
-    if not best_candidate:
-        raise ValueError("未检测到身份证边框")
-
-    if debug:
-        print(f"成功使用形态学参数组合 {winning_combo}: 面积={best_candidate[1]:.0f}, 比例={best_candidate[2]:.2f}, 评分={best_candidate[0]:.0f}")
-
-    card_pts = best_candidate[3]
-
-    # 7. 透视矫正并裁剪，将四角收缩比例调升至 5.5%，规避阴影
-    shrunk_pts = shrink_quad(card_pts, factor=0.945)
-    cropped = four_point_transform(original, shrunk_pts)
-
-    # 如果裁剪后是竖着的，可以自动转正
-    h, w = cropped.shape[:2]
-    if h > w:
-        cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
-
-    # 强行缩放到 1:1 标准高精尺寸 1063 x 710，采用 Lanczos4 获最高品质
-    cropped_resized = cv2.resize(cropped, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
-
-    # 绘制纯物理白边以遮盖边缘毛刺 (thickness=16, 覆盖 16 像素，线宽 32)
-    cropped_resized = add_white_border(cropped_resized, thickness=16)
-
-    cv2.imwrite(output_path, cropped_resized)
-
-    return output_path
+def process_and_generate_pdf(front_path, back_path, output_pdf="身份证复印件.pdf", 
+                             enhance=True, debug=False):
+    """
+    完整流程：裁剪身份证 -> 增强图像 -> 生成PDF
+    
+    参数:
+        front_path: 正面原始图片路径
+        back_path: 反面原始图片路径
+        output_pdf: 输出PDF文件名
+        enhance: 是否进行图像增强
+        debug: 是否输出调试信息
+    """
+    print("=" * 50)
+    print("开始处理身份证图片并生成PDF")
+    print("=" * 50)
+    
+    # 创建输出目录
+    os.makedirs("output", exist_ok=True)
+    
+    # 处理正面
+    print("\n[1/4] 处理身份证正面...")
+    front_cropped = "output/front_cropped.jpg"
+    try:
+        crop_id_card(front_path, front_cropped, debug=debug)
+        print("✓ 正面裁剪完成")
+    except Exception as e:
+        print(f"✗ 正面处理失败: {e}")
+        return None
+    
+    # 处理反面
+    print("\n[2/4] 处理身份证反面...")
+    back_cropped = "output/back_cropped.jpg"
+    try:
+        crop_id_card(back_path, back_cropped, debug=debug)
+        print("✓ 反面裁剪完成")
+    except Exception as e:
+        print(f"✗ 反面处理失败: {e}")
+        return None
+    
+    # 图像增强
+    if enhance:
+        print("\n[3/4] 增强图像质量...")
+        try:
+            # 增强正面
+            front_img = cv2.imread(front_cropped)
+            front_enhanced = enhance_image_quality(front_img)
+            front_final = "output/front_enhanced.jpg"
+            cv2.imwrite(front_final, front_enhanced, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            
+            # 增强反面
+            back_img = cv2.imread(back_cropped)
+            back_enhanced = enhance_image_quality(back_img)
+            back_final = "output/back_enhanced.jpg"
+            cv2.imwrite(back_final, back_enhanced, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            
+            print("✓ 图像增强完成")
+        except Exception as e:
+            print(f"✗ 图像增强失败: {e}")
+            front_final = front_cropped
+            back_final = back_cropped
+    else:
+        front_final = front_cropped
+        back_final = back_cropped
+    
+    # 生成PDF
+    print("\n[4/4] 生成PDF文件...")
+    try:
+        pdf_path = os.path.join("output", output_pdf)
+        create_id_card_pdf(front_final, back_final, pdf_path)
+        print("✓ PDF生成完成")
+        print(f"\n{'=' * 50}")
+        print(f"成功！文件保存在: {pdf_path}")
+        print(f"{'=' * 50}")
+        return pdf_path
+    except Exception as e:
+        print(f"✗ PDF生成失败: {e}")
+        return None
 
 
 if __name__ == "__main__":
-    try:
-        print("Testing front ID card...")
-        crop_id_card("testdata/身份证正面.jpg", "front_crop.jpg", debug=True)
-        print("Front card cropped successfully!")
-    except Exception as e:
-        print(f"Front card cropping failed: {e}")
-
-    try:
-        print("\nTesting back ID card...")
-        crop_id_card("testdata/身份证反面.jpg", "back_crop.jpg", debug=True)
-        print("Back card cropped successfully!")
-    except Exception as e:
-        print(f"Back card cropping failed: {e}")
+    # 完整流程示例
+    process_and_generate_pdf(
+        front_path="testdata/身份证正面.jpg",
+        back_path="testdata/身份证反面.jpg",
+        output_pdf="身份证复印件.pdf",
+        enhance=True,
+        debug=False
+    )

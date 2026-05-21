@@ -5,10 +5,11 @@ import { useApp } from '../context/AppContext';
 import SystemStatus from './SystemStatus';
 import LogViewer from './LogViewer';
 import GenericTool from './GenericTool';
+import Settings from './Settings';
 import './Layout.css';
 
 export default function Layout() {
-  const { activeCategory, activeTool } = useApp();
+  const { activeCategory, activeTool, isSettingsOpen } = useApp();
 
   // Route active components dynamically based on state
   const renderActiveTool = () => {
@@ -30,6 +31,9 @@ export default function Layout() {
           {renderActiveTool()}
         </div>
       </div>
+      
+      {/* iOS settings overlay */}
+      {isSettingsOpen && <Settings />}
     </div>
   );
 }

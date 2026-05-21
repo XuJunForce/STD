@@ -12,6 +12,43 @@
   display: flex;
   align-items: center;
   gap: 10px;
+  cursor: pointer;
+  padding: 4px 8px;
+  border-radius: 8px;
+  transition: var(--transition-smooth);
+  position: relative;
+}
+
+.logo-section:hover {
+  background: var(--bg-pill-hover);
+  transform: scale(1.02);
+}
+
+.logo-section::after {
+  content: "点击打开设置 (Settings)";
+  position: absolute;
+  top: 100%;
+  left: 8px;
+  background: var(--bg-sidebar);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  padding: 6px 10px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  transition: var(--transition-smooth);
+  box-shadow: var(--shadow-ambient);
+  z-index: 100;
+  transform: translateY(4px);
+  backdrop-filter: blur(8px);
+}
+
+.logo-section:hover::after {
+  opacity: 1;
+  transform: translateY(8px);
 }
 
 .logo-pulse {
@@ -45,7 +82,8 @@
   font-size: 1.25rem;
   font-weight: 700;
   letter-spacing: 0.5px;
-  color: #fff;
+  color: var(--logo-text-color);
+  transition: var(--transition-smooth);
 }
 
 .text-glow {
@@ -67,7 +105,7 @@
   border-radius: 9999px; /* Absolute oval shape */
   background: var(--bg-pill);
   border: 1px solid var(--border-color);
-  color: #94A3B8;
+  color: var(--text-secondary);
   font-weight: 500;
   font-size: 0.9rem;
   position: relative;
@@ -78,7 +116,7 @@
 .category-pill:hover {
   background: var(--bg-pill-hover);
   border-color: var(--border-color-hover);
-  color: #fff;
+  color: var(--text-pure);
   transform: translateY(-1px);
 }
 

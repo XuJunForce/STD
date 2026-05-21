@@ -29,12 +29,12 @@
 .telemetry-header-text h2 {
   font-size: 1.4rem;
   font-weight: 700;
-  color: #fff;
+  color: var(--text-title);
 }
 
 .telemetry-header-text p {
   font-size: 0.85rem;
-  color: #64748B;
+  color: var(--text-muted);
   margin-top: 4px;
 }
 
@@ -54,13 +54,13 @@
   height: 100%;
   min-height: 220px;
   border-radius: 20px;
-  background: rgba(13, 20, 38, 0.4);
+  background: var(--bg-card);
 }
 
 .telemetry-card-title {
   font-size: 0.8rem;
   font-weight: 700;
-  color: #64748B;
+  color: var(--text-muted);
   letter-spacing: 0.8px;
   text-transform: uppercase;
 }
@@ -71,12 +71,12 @@
   margin: 20px 0;
   font-size: 1.6rem;
   font-weight: 700;
-  color: #fff;
+  color: var(--text-title);
 }
 
 .platform-sub {
   font-size: 1rem;
-  color: #64748B;
+  color: var(--text-muted);
   font-weight: 400;
 }
 
@@ -144,7 +144,7 @@
   justify-content: space-between;
   font-size: 0.8rem;
   font-weight: 500;
-  color: #94A3B8;
+  color: var(--text-secondary);
 }
 
 .text-success {
@@ -176,7 +176,7 @@
 
 .telemetry-footer-tip {
   font-size: 0.75rem;
-  color: #64748B;
+  color: var(--text-muted);
 }
 
 /* pulse breathing animation for heartbeat checks */

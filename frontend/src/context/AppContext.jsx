@@ -27,6 +27,22 @@ export const AppProvider = ({ children }) => {
   const [sidebarExpanded, setSidebarExpanded] = useState(true);
   const [sessionId] = useState(generateSessionId());
   
+  // Settings & Theme control states
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [theme, setThemeState] = useState(() => localStorage.getItem('theme') || 'dark');
+
+  // Change theme globally & update DOM attribute + persistence
+  const setTheme = (newTheme) => {
+    setThemeState(newTheme);
+    localStorage.setItem('theme', newTheme);
+    document.documentElement.setAttribute('data-theme', newTheme);
+  };
+
+  // Sync theme with HTML data attribute on mount & change
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
   // Backend dynamic statistics and logs
   const [backendStatus, setBackendStatus] = useState({ online: false, data: null });
   const [logs, setLogs] = useState([]);
@@ -119,12 +135,16 @@ export const AppProvider = ({ children }) => {
         backendStatus,
         logs,
         loadingLogs,
+        isSettingsOpen,
+        theme,
         setActiveTool,
         setSidebarExpanded,
         changeCategory,
         fetchSystemStatus,
         fetchLogs,
-        logFrontendAction
+        logFrontendAction,
+        setIsSettingsOpen,
+        setTheme
       }}
     >
       {children}

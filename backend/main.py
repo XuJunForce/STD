@@ -29,7 +29,7 @@ def on_startup():
         print(f"Startup: Error initializing database tables: {e}")
 
 # Register the aggregated main router
-app.include_router(api_router, prefix="/api")
+app.include_router(api_router, prefix="/api/v1")
 
 # Legacy/Scaffold health endpoint for high-level check
 @app.get("/health")

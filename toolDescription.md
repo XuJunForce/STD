@@ -1,22 +1,93 @@
 # 工具说明文档 (Tool Description)
 
-该文档用于记录和维护小工具平台（STD）中的所有工具模块。随着平台的迭代和新工具的开发，所有新增加的工具必须在此文档中注册并详细记录其功能、接口规范、缓存配置以及调用方式。
+该文档用于记录和维护小工具平台（STD）中的所有工具模块与平台基础微服务。
 
-## 平台基础工具 (Platform Base Tools)
+## 平台级基础微服务 (Platform Base Telemetry)
 
-系统目前已完成所有 mock/临时小工具的清理，仅保留平台级基础微服务。
-
-### 1. 系统状态 (System Status)
-- **ID**: `status`
-- **分类**: `system` (系统状态)
-- **图标**: 📊
-- **描述**: 用于实时监测系统运行指标、后端服务活性、数据库连接与缓存层状态。
-
-### 2. 调用链追踪 (Trace Logs)
+### 1. 全链路追踪与日志遥测 (Trace Logs)
 - **ID**: `logs`
-- **分类**: `system` (系统状态)
 - **图标**: 👁️
-- **描述**: 红绿灰三色可视化埋点调用路径界面，记录并展示所有工具的调用历史和执行耗时。
+- **服务路径**: `/api/v1/logs`
+- **存在原因 (Why it exists)**:
+  作为高级小工具开发平台（STD），所有工具的调用、时延以及报错必须有高度可视化的埋点遥测。该服务专门用于捕捉前台触发、API 网关、后端核心逻辑到数据库持久化的完整生命周期链路，为 AI Agent 和人类开发者提供极致直观的**红绿灰三色调用链追踪看板**。它能够有效隔离断点，快速通过异常堆栈定位报错根源，是平台不可或缺的排障与审计核心。
+
+#### 详细用法 (Usage)
+1. **前端页面**:
+   - 作为一个完全独立的平台顶级页面展现。
+   - **三色可视化**: 正常运行为绿色，异常中断为红色，因报错受阻未涉及的持久层节点则呈现灰色。
+   - **元数据详情**: 支持点击行调取 iOS 毛玻璃卡片详情，美化展示 JSON 输入参数、详细报错与异常堆栈。
+   - **格式化导出**: 详情内和主列表顶部均支持直接生成并下载 AI 友好的 JSON 及 XML 格式日志。
+   - **一键清空**: 支持物理删除数据库中的所有日志，以便开启全新的干净链路测试。
+
+2. **后端 API 调用**:
+   - **记录日志**: `POST /api/v1/logs/`。接收完整 JSON 埋点信息并持久化。
+   - **读取日志**: `GET /api/v1/logs/`。支持 session_id、tool_type、status 多维度过滤。
+   - **清空日志**: `DELETE /api/v1/logs/clear`。彻底清空数据库日志表。
+
+3. **CLI 命令行工具 (mini-tool)**:
+   - 直连 MySQL 数据库，不依赖 FastAPI 服务，离线随时可用。支持管道重定向和人类友好表格输出。
+
+#### 调用与交互示例 (Examples)
+
+##### API 示例
+- **请求方法**: `POST /api/v1/logs/`
+- **Payload**:
+  ```json
+  {
+    "session_id": "sess-a9x8y7-1716300000000",
+    "tool_type": "pdf-merge",
+    "ui_path": "/trace/pdf-merge",
+    "execution_path": "backend.services.pdf:merge",
+    "execution_time_ms": 145,
+    "status": "success",
+    "parameters": {
+      "files": ["report_q1.pdf", "report_q2.pdf"],
+      "output_name": "q1_q2_merged.pdf"
+    }
+  }
+  ```
+- **Standard Response**:
+  ```json
+  {
+    "code": 0,
+    "message": "success",
+    "data": {
+      "id": 12,
+      "session_id": "sess-a9x8y7-1716300000000",
+      "tool_type": "pdf-merge",
+      "ui_path": "/trace/pdf-merge",
+      "execution_path": "backend.services.pdf:merge",
+      "execution_time_ms": 145,
+      "status": "success",
+      "parameters": "{\"files\": [\"report_q1.pdf\", \"report_q2.pdf\"], \"output_name\": \"q1_q2_merged.pdf\"}",
+      "error_message": null,
+      "stack_trace": null,
+      "created_at": "2026-05-21T13:46:12"
+    }
+  }
+  ```
+
+##### CLI 命令行调用示例
+- **输出精美表格列表**:
+  ```bash
+  ./mini-tool logs --all
+  ```
+- **搜索特定 Session 的调用链路**:
+  ```bash
+  ./mini-tool logs --search "sess-test"
+  ```
+- **查询特定 ID 的日志细节并输出 XML**:
+  ```bash
+  ./mini-tool logs --id 12 --format xml
+  ```
+- **将所有日志以 AI 友好的 JSON 格式直接导出到指定文件**:
+  ```bash
+  ./mini-tool logs --export --format json --output ./logs_dump.json
+  ```
+- **一键清空日志**:
+  ```bash
+  ./mini-tool logs --clear
+  ```
 
 ---
 

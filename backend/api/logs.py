@@ -5,7 +5,7 @@ from pydantic import BaseModel, Field
 from datetime import datetime
 
 from backend.services.db_service import get_db
-from backend.services.log_service import log_invocation, get_logs
+from backend.services.log_service import log_invocation, get_logs, ToolInvocation
 
 router = APIRouter()
 
@@ -37,7 +37,22 @@ class LogResponse(BaseModel):
     class Config:
         from_attributes = True
 
-@router.post("/", response_model=LogResponse)
+class StandardResponse(BaseModel):
+    code: int = 0
+    message: str = "success"
+    data: Optional[Any] = None
+
+class StandardLogResponse(BaseModel):
+    code: int = 0
+    message: str = "success"
+    data: LogResponse
+
+class StandardLogListResponse(BaseModel):
+    code: int = 0
+    message: str = "success"
+    data: List[LogResponse]
+
+@router.post("/", response_model=StandardLogResponse)
 def create_log_entry(log_in: LogCreate, db: Session = Depends(get_db)):
     try:
         db_log = log_invocation(
@@ -52,11 +67,11 @@ def create_log_entry(log_in: LogCreate, db: Session = Depends(get_db)):
             error_message=log_in.error_message,
             stack_trace=log_in.stack_trace
         )
-        return db_log
+        return {"code": 0, "message": "success", "data": db_log}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database logging failed: {e}")
 
-@router.get("/", response_model=List[LogResponse])
+@router.get("/", response_model=StandardLogListResponse)
 def read_log_entries(
     session_id: Optional[str] = Query(None, description="Filter logs by session ID"),
     tool_type: Optional[str] = Query(None, description="Filter logs by tool type name"),
@@ -74,6 +89,17 @@ def read_log_entries(
             limit=limit,
             offset=offset
         )
-        return logs
+        return {"code": 0, "message": "success", "data": logs}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Database query failed: {e}")
+
+@router.delete("/clear", response_model=StandardResponse)
+def clear_log_entries(db: Session = Depends(get_db)):
+    try:
+        num_deleted = db.query(ToolInvocation).delete()
+        db.commit()
+        return {"code": 0, "message": f"Successfully cleared all execution trace logs ({num_deleted} records deleted).", "data": None}
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(status_code=500, detail=f"Database clear failed: {e}")
+

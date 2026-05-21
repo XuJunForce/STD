@@ -2,17 +2,9 @@ import React, { createContext, useState, useEffect, useContext } from 'react';
 
 const AppContext = createContext();
 
-// Mock/Default list of categories and tools in the system
-const INITIAL_CATEGORIES = [
-  { id: 'system', name: '系统状态', icon: '⚡' }
-];
-
-const INITIAL_TOOLS = {
-  system: [
-    { id: 'status', name: '健康与状态', desc: '监测系统运行指标与微服务状态', icon: '📊' },
-    { id: 'logs', name: '调用链追踪', desc: '红绿灰三色可视化埋点调用路径', icon: '👁️' }
-  ]
-};
+// No active categories/tools needed for base view since logs is a premium standalone panel
+const INITIAL_CATEGORIES = [];
+const INITIAL_TOOLS = {};
 
 // Generate a high-fidelity random session ID for user path tracing
 const generateSessionId = () => {
@@ -22,9 +14,9 @@ const generateSessionId = () => {
 export const AppProvider = ({ children }) => {
   const [categories] = useState(INITIAL_CATEGORIES);
   const [tools] = useState(INITIAL_TOOLS);
-  const [activeCategory, setActiveCategory] = useState('system');
-  const [activeTool, setActiveTool] = useState('status');
-  const [sidebarExpanded, setSidebarExpanded] = useState(true);
+  const [activeCategory, setActiveCategory] = useState('');
+  const [activeTool, setActiveTool] = useState('');
+  const [sidebarExpanded, setSidebarExpanded] = useState(false); // Collapse sidebar as default since no categories
   const [sessionId] = useState(generateSessionId());
   
   // Settings & Theme control states
@@ -48,10 +40,10 @@ export const AppProvider = ({ children }) => {
   const [logs, setLogs] = useState([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
 
-  // Fetch backend system status
+  // Fetch backend gateway status via health check endpoint
   const fetchSystemStatus = async () => {
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/system/status');
+      const response = await fetch('http://127.0.0.1:8000/health');
       if (response.ok) {
         const data = await response.json();
         setBackendStatus({ online: true, data });
@@ -63,14 +55,14 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  // Fetch logs from backend
+  // Fetch logs from backend matching standard format {"code": 0, "message": "success", "data": [...]}
   const fetchLogs = async () => {
     setLoadingLogs(true);
     try {
-      const response = await fetch('http://127.0.0.1:8000/api/logs/');
+      const response = await fetch('http://127.0.0.1:8000/api/v1/logs/');
       if (response.ok) {
-        const data = await response.json();
-        setLogs(data);
+        const res = await response.json();
+        setLogs(res.data || []);
       }
     } catch (error) {
       console.error('Error fetching logs:', error);
@@ -82,7 +74,7 @@ export const AppProvider = ({ children }) => {
   // Log a frontend action to the backend database
   const logFrontendAction = async (toolId, status = 'success', extraParams = {}, errMsg = null, trace = null) => {
     try {
-      await fetch('http://127.0.0.1:8000/api/logs/', {
+      await fetch('http://127.0.0.1:8000/api/v1/logs/', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'
@@ -90,7 +82,7 @@ export const AppProvider = ({ children }) => {
         body: JSON.stringify({
           session_id: sessionId,
           tool_type: toolId,
-          ui_path: `/${activeCategory}/${toolId}`,
+          ui_path: `/trace/${toolId}`,
           execution_path: `frontend/src/components/${toolId}.jsx:handleAction`,
           execution_time_ms: Math.floor(Math.random() * 120) + 10, // Simulate execution delay
           status: status,
@@ -103,6 +95,21 @@ export const AppProvider = ({ children }) => {
       fetchLogs();
     } catch (err) {
       console.error('Failed to report invocation tracking log:', err);
+    }
+  };
+
+  // Clear logs from backend database
+  const clearLogs = async () => {
+    try {
+      const response = await fetch('http://127.0.0.1:8000/api/v1/logs/clear', {
+        method: 'DELETE'
+      });
+      if (response.ok) {
+        // Immediately record an entry for logs clearance action
+        await logFrontendAction('clear-logs', 'success', { action: 'database_clear' });
+      }
+    } catch (err) {
+      console.error('Failed to clear logs:', err);
     }
   };
 
@@ -143,6 +150,7 @@ export const AppProvider = ({ children }) => {
         fetchSystemStatus,
         fetchLogs,
         logFrontendAction,
+        clearLogs,
         setIsSettingsOpen,
         setTheme
       }}
@@ -153,3 +161,4 @@ export const AppProvider = ({ children }) => {
 };
 
 export const useApp = () => useContext(AppContext);
+

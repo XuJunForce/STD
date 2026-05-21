@@ -7,6 +7,35 @@ import './IdCardScanner.css';
  * @param {HTMLImageElement} img 原始Image对象
  * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number, warpedCanvas: HTMLCanvasElement, source: string }
  */
+/**
+ * 辅助数学函数：计算 cv.minAreaRect 旋转矩形的四个顶点
+ * 避免依赖 OpenCV.js 内部可能未导出的 cv.boxPoints 或 cv.RotatedRect.points
+ */
+function getRotatedRectPoints(rotatedRect) {
+  const cx = rotatedRect.center.x;
+  const cy = rotatedRect.center.y;
+  const w = rotatedRect.size.width;
+  const h = rotatedRect.size.height;
+  const angle = (rotatedRect.angle * Math.PI) / 180.0;
+
+  const dx1 = (w / 2) * Math.cos(angle);
+  const dy1 = (w / 2) * Math.sin(angle);
+  const dx2 = -(h / 2) * Math.sin(angle);
+  const dy2 = (h / 2) * Math.cos(angle);
+
+  return [
+    { x: cx - dx1 - dx2, y: cy - dy1 - dy2 },
+    { x: cx + dx1 - dx2, y: cy + dy1 - dy2 },
+    { x: cx + dx1 + dx2, y: cy + dy1 + dy2 },
+    { x: cx - dx1 + dx2, y: cy - dy1 + dy2 }
+  ];
+}
+
+/**
+ * 纯前端高性能身份证智能透视校正与边缘提取算法 (OpenCV.js Wasm 纠偏 + 自研双向二值化漫水填充 + 多维度几何打分)
+ * @param {HTMLImageElement} img 原始Image对象
+ * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number, warpedCanvas: HTMLCanvasElement, source: string }
+ */
 function detectIdCardRect(img) {
   // ==================== 第一防线：OpenCV.js Wasm 智能四角检测与 3D 透视纠偏 ====================
   if (window.cv && window.cv.Mat && window.cv.getPerspectiveTransform) {
@@ -17,80 +46,140 @@ function detectIdCardRect(img) {
       let src = cv.imread(img);
       let gray = new cv.Mat();
       let blurred = new cv.Mat();
-      let edges = new cv.Mat();
-      let dilated = new cv.Mat();
       
-      // 2. 预处理：灰度化与高斯去噪
+      // 2. 预处理：灰度化
       cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
-      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
       
-      // 3. Canny 算子高精提取边缘
-      cv.Canny(blurred, edges, 75, 200);
+      // 3. 自适应直方图均衡化 (CLAHE) - 显著增强局部对比度以应对阴影和昏暗环境
+      let preprocessed = new cv.Mat();
+      try {
+        let clahe = new cv.CLAHE(2.0, new cv.Size(8, 8));
+        clahe.apply(gray, preprocessed);
+        clahe.delete();
+      } catch (claheError) {
+        console.warn("⚠️ OpenCV.js CLAHE is not supported in this build, falling back to basic gray.", claheError);
+        gray.copyTo(preprocessed);
+      }
+      gray.delete();
       
-      // 4. 3x3 矩形结构元膨胀粗化，桥接细微断缝
-      let M = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
-      cv.dilate(edges, dilated, M);
-      M.delete();
+      // 4. 去噪
+      cv.GaussianBlur(preprocessed, blurred, new cv.Size(5, 5), 0);
+      preprocessed.delete();
       
-      // 5. 提取外部边缘轮廓
+      // 5. 多种 Canny 算子边缘检测并合并，大幅提高边缘检测召回率
+      let edges1 = new cv.Mat();
+      let edges2 = new cv.Mat();
+      let edges3 = new cv.Mat();
+      let edgesTemp = new cv.Mat();
+      let edges = new cv.Mat();
+      
+      cv.Canny(blurred, edges1, 30, 100);
+      cv.Canny(blurred, edges2, 50, 150);
+      cv.Canny(blurred, edges3, 75, 200);
+      
+      cv.bitwise_or(edges1, edges2, edgesTemp);
+      cv.bitwise_or(edgesTemp, edges3, edges);
+      
+      edges1.delete();
+      edges2.delete();
+      edges3.delete();
+      edgesTemp.delete();
+      blurred.delete();
+      
+      // 6. 形态学操作：先闭合后膨胀，粗化和桥接断裂的边缘
+      let closed = new cv.Mat();
+      let dilated = new cv.Mat();
+      let kernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(5, 5));
+      cv.morphologyEx(edges, closed, cv.MORPH_CLOSE, kernel);
+      cv.dilate(closed, dilated, kernel, new cv.Point(-1, -1), 1);
+      
+      kernel.delete();
+      edges.delete();
+      closed.delete();
+      
+      // 7. 提取外部边缘轮廓
       let contours = new cv.MatVector();
       let hierarchy = new cv.Mat();
       cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
       
-      let bestContour = null;
-      let approxPoly = new cv.Mat();
-      let maxArea = -1;
+      let candidates = [];
       const imgArea = src.cols * src.rows;
       
-      // 遍历轮廓寻找最大面积且几何合理的多边形四角轮廓
+      // 遍历所有外部轮廓
       for (let i = 0; i < contours.size(); ++i) {
         let contour = contours.get(i);
         let area = cv.contourArea(contour);
         
-        // 排除满屏噪点和极其细碎噪点（阈值设为占画面面积的 6% 至 95%）
-        if (area < imgArea * 0.06 || area > imgArea * 0.95) {
+        // 降低面积下限至 3%，确保即使身份证在镜头中占比较小也能完美召回
+        if (area < imgArea * 0.03) {
           contour.delete();
           continue;
         }
         
-        // 多边形逼近 (RDP 算子逼近)
         let peri = cv.arcLength(contour, true);
-        let approx = new cv.Mat();
-        cv.approxPolyDP(contour, approx, 0.022 * peri, true);
         
-        // 逼近结果必须是凸四边形
-        if (approx.rows === 4 && cv.isContourConvex(approx)) {
-          // 比例校验（宽高比要在 [1.1, 2.1] 之间）
-          let rect = cv.boundingRect(approx);
-          const ratio = rect.width / rect.height;
-          const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio;
+        // 尝试不同的 RDP 逼近精度因子以求最精确的多边形拟合
+        for (let epsilonFactor of [0.02, 0.03, 0.04, 0.05]) {
+          let approx = new cv.Mat();
+          cv.approxPolyDP(contour, approx, epsilonFactor * peri, true);
           
-          if (ratioNorm >= 1.1 && ratioNorm <= 2.1) {
-            if (area > maxArea) {
-              maxArea = area;
-              if (approxPoly.rows > 0) approxPoly.delete();
-              approxPoly = approx.clone();
-              if (bestContour) bestContour.delete();
-              bestContour = contour.clone();
+          let numVertices = approx.rows;
+          
+          // 接受 4 到 6 边形（有效滤除轻微弯曲或圆角干扰）
+          if (numVertices >= 4 && numVertices <= 6) {
+            let pts = [];
+            if (numVertices > 4) {
+              // 5或6边形，采用最小外接矩形 (minAreaRect) 四角兜底
+              let rotRect = cv.minAreaRect(contour);
+              pts = getRotatedRectPoints(rotRect);
+            } else {
+              // 完美四边形直接读取顶点
+              for (let j = 0; j < 4; j++) {
+                pts.push({
+                  x: approx.data32S[j * 2],
+                  y: approx.data32S[j * 2 + 1]
+                });
+              }
+            }
+            
+            // 估计外包围矩形及宽高比
+            let minX = Math.min(...pts.map(p => p.x));
+            let maxX = Math.max(...pts.map(p => p.x));
+            let minY = Math.min(...pts.map(p => p.y));
+            let maxY = Math.max(...pts.map(p => p.y));
+            let w = maxX - minX;
+            let h = maxY - minY;
+            
+            if (w > 0 && h > 0) {
+              let ratio = Math.max(w, h) / Math.min(w, h);
+              // 宽高比放宽限制至 [1.3, 2.0]
+              if (ratio >= 1.3 && ratio <= 2.0) {
+                // 精英评分机制：面积越大且比例越接近标准 1.586 (85.6 / 54) 得分越高
+                let score = area * (1.0 - Math.abs(ratio - 1.586) / 1.586);
+                candidates.push({
+                  score,
+                  area,
+                  ratio,
+                  pts
+                });
+                approx.delete();
+                break; // 拟合成功后跳出精度尝试
+              }
             }
           }
+          approx.delete();
         }
-        approx.delete();
         contour.delete();
       }
       
-      // 如果找到了完美的身份证四角区域，执行高级透视拉平纠偏 (Warp Perspective)
-      if (approxPoly.rows === 4) {
-        let pts = [];
-        for (let i = 0; i < 4; i++) {
-          pts.push({
-            x: approxPoly.data32S[i * 2],
-            y: approxPoly.data32S[i * 2 + 1]
-          });
-        }
+      // A1. 首选高维智能多边形四角透视纠偏
+      if (candidates.length > 0) {
+        // 按综合评分从高到低排序
+        candidates.sort((a, b) => b.score - a.score);
+        let best = candidates[0];
+        let pts = best.pts;
         
-        // 6. 对四个顶点进行时针排序 (左上, 右上, 右下, 左下)
-        // 使用标准的 x+y(sum) 和 x-y(diff) 归纳法
+        // 四点顺时针严格排序 (左上, 右上, 右下, 左下)
         let sortedPts = new Array(4);
         let sums = pts.map(p => p.x + p.y);
         let diffs = pts.map(p => p.x - p.y);
@@ -100,9 +189,8 @@ function detectIdCardRect(img) {
         let tr_idx = diffs.indexOf(Math.max(...diffs));
         let bl_idx = diffs.indexOf(Math.min(...diffs));
         
-        // 健壮性排序防重叠过滤
         if (tl_idx === br_idx || tr_idx === bl_idx) {
-          // 若偏振重叠，回退到按 X 轴与 Y 轴交集分割
+          // 极少数冲突退化排序
           pts.sort((a, b) => a.x - b.x);
           let leftHalf = [pts[0], pts[1]].sort((a, b) => a.y - b.y);
           let rightHalf = [pts[2], pts[3]].sort((a, b) => a.y - b.y);
@@ -117,7 +205,6 @@ function detectIdCardRect(img) {
           sortedPts[3] = pts[bl_idx];
         }
         
-        // 7. 执行 Perspective Warp 透视矩阵变换
         let warpedCanvas = document.createElement('canvas');
         warpedCanvas.width = 856;
         warpedCanvas.height = 540;
@@ -137,20 +224,29 @@ function detectIdCardRect(img) {
         
         let transMat = cv.getPerspectiveTransform(srcTri, dstTri);
         let warpedMat = new cv.Mat();
-        let dsize = new cv.Size(856, 540);
+        cv.warpPerspective(
+          src,
+          warpedMat,
+          transMat,
+          new cv.Size(856, 540),
+          cv.INTER_LINEAR,
+          cv.BORDER_CONSTANT,
+          new cv.Scalar()
+        );
         
-        cv.warpPerspective(src, warpedMat, transMat, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
-        
-        // 投影到输出画布
         cv.imshow(warpedCanvas, warpedMat);
         
-        // 内存精准回收，绝对预防 WebAssembly OOM 内存泄露
-        src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
-        contours.delete(); hierarchy.delete(); approxPoly.delete();
-        if (bestContour) bestContour.delete();
-        srcTri.delete(); dstTri.delete(); transMat.delete(); warpedMat.delete();
+        // 垃圾回收，绝不泄露
+        src.delete();
+        dilated.delete();
+        contours.delete();
+        hierarchy.delete();
+        srcTri.delete();
+        dstTri.delete();
+        transMat.delete();
+        warpedMat.delete();
         
-        console.log("🔥 [AI Engine] OpenCV Wasm 透视拉平转换成功！");
+        console.log("🔥 [AI Engine] OpenCV.js Wasm 智能多重拟合与透视纠偏成功！得分:", best.score);
         return {
           success: true,
           warpedCanvas,
@@ -161,10 +257,16 @@ function detectIdCardRect(img) {
       // ==================== 第二防线：OpenCV.js 直立外接包围矩形定位 (逼近失败时二级降级) ====================
       let maxContourArea = -1;
       let rectMat = null;
-      for (let i = 0; i < contours.size(); ++i) {
-        let contour = contours.get(i);
+      
+      // 重新提取轮廓进行外接矩形匹配
+      let tempContours = new cv.MatVector();
+      let tempHierarchy = new cv.Mat();
+      cv.findContours(dilated, tempContours, tempHierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      
+      for (let i = 0; i < tempContours.size(); ++i) {
+        let contour = tempContours.get(i);
         let area = cv.contourArea(contour);
-        if (area > imgArea * 0.08 && area < imgArea * 0.95) {
+        if (area > imgArea * 0.05 && area < imgArea * 0.95) {
           let rect = cv.boundingRect(contour);
           const ratio = rect.width / rect.height;
           const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio;
@@ -179,28 +281,30 @@ function detectIdCardRect(img) {
         contour.delete();
       }
       
+      tempContours.delete();
+      tempHierarchy.delete();
+      dilated.delete();
+      contours.delete();
+      hierarchy.delete();
+      
       if (rectMat) {
         const x = rectMat.x;
         const y = rectMat.y;
         const width = rectMat.width;
         const height = rectMat.height;
-        
-        src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
-        contours.delete(); hierarchy.delete(); approxPoly.delete();
-        if (bestContour) bestContour.delete();
-        
-        console.log("💡 [AI Engine] OpenCV 轮廓外接矩形提取成功！");
+        src.delete();
+        console.log("💡 [AI Engine] OpenCV.js 轮廓直立外接矩形兜底提取成功！");
         return {
           success: true,
-          x, y, width, height,
+          x,
+          y,
+          width,
+          height,
           source: 'opencv-bbox'
         };
       }
       
-      // 释放多余 Mat 内存
-      src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
-      contours.delete(); hierarchy.delete(); approxPoly.delete();
-      if (bestContour) bestContour.delete();
+      src.delete();
     } catch (e) {
       console.warn("⚠️ OpenCV.js processing error, auto fallback to custom JS algorithm: ", e);
     }

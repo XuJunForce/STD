@@ -7,11 +7,16 @@ import './IdCardScanner.css';
  * @param {HTMLImageElement} img 原始Image对象
  * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number }
  */
+/**
+ * 纯前端高性能身份证边缘与区域提取算法 (自适应双向二值化 + 边缘闭合漫水填充 + 几何打分排名)
+ * @param {HTMLImageElement} img 原始Image对象
+ * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number }
+ */
 function detectIdCardRect(img) {
   try {
+    // 1. 下采样处理，控制在 160px 左右，极大提升纯 JS 像素遍历的速度并实现高频滤波去噪
     const canvas = document.createElement('canvas');
-    // 使用降维处理，提升纯前端算法像素遍历的速度
-    const maxDim = 400;
+    const maxDim = 160;
     let w = img.width;
     let h = img.height;
     if (w > maxDim || h > maxDim) {
@@ -25,134 +30,285 @@ function detectIdCardRect(img) {
     }
     canvas.width = w;
     canvas.height = h;
+    
     const ctx = canvas.getContext('2d');
     ctx.drawImage(img, 0, 0, w, h);
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
 
-    // 1. 转为灰度图
+    // 2. 灰度化处理
     const gray = new Uint8ClampedArray(w * h);
     for (let i = 0; i < data.length; i += 4) {
-      // 标准灰度化公式
       gray[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
     }
 
-    // 2. Sobel算子梯度滤波
+    // 3. 辅助函数：计算 Otsu 自适应灰度二值化阈值
+    const getOtsuThreshold = (grayArr) => {
+      const hist = new Int32Array(256);
+      for (let i = 0; i < grayArr.length; i++) {
+        hist[grayArr[i]]++;
+      }
+      const total = grayArr.length;
+      let sum = 0;
+      for (let i = 0; i < 256; i++) sum += i * hist[i];
+
+      let sumB = 0;
+      let wB = 0;
+      let wF = 0;
+      let varMax = 0;
+      let threshold = 128;
+
+      for (let i = 0; i < 256; i++) {
+        wB += hist[i];
+        if (wB === 0) continue;
+        wF = total - wB;
+        if (wF === 0) break;
+
+        sumB += i * hist[i];
+        const mB = sumB / wB;
+        const mF = (sum - sumB) / wF;
+
+        const varBetween = wB * wF * (mB - mF) * (mB - mF);
+        if (varBetween > varMax) {
+          varMax = varBetween;
+          threshold = i;
+        }
+      }
+      return threshold;
+    };
+
+    const otsuThresh = getOtsuThreshold(gray);
+
+    // 4. 辅助函数：广度优先搜索 (BFS) 寻找连通域，避免 JS 递归导致的大图爆栈
+    const findConnectedComponents = (binaryData) => {
+      const visited = new Uint8Array(w * h);
+      const components = [];
+      
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const idx = y * w + x;
+          if (binaryData[idx] === 1 && !visited[idx]) {
+            let minX = x, maxX = x, minY = y, maxY = y;
+            let area = 0;
+            const queue = [idx];
+            visited[idx] = 1;
+            
+            let head = 0;
+            while (head < queue.length) {
+              const curIdx = queue[head++];
+              const cx = curIdx % w;
+              const cy = Math.floor(curIdx / w);
+              area++;
+
+              if (cx < minX) minX = cx;
+              if (cx > maxX) maxX = cx;
+              if (cy < minY) minY = cy;
+              if (cy > maxY) maxY = cy;
+
+              // 4邻域扩散
+              const neighbors = [curIdx - 1, curIdx + 1, curIdx - w, curIdx + w];
+              for (const nIdx of neighbors) {
+                if (nIdx >= 0 && nIdx < w * h) {
+                  const nx = nIdx % w;
+                  const ny = Math.floor(nIdx / w);
+                  // 避免跨行换边折返
+                  if (Math.abs(nx - cx) <= 1) {
+                    if (binaryData[nIdx] === 1 && !visited[nIdx]) {
+                      visited[nIdx] = 1;
+                      queue.push(nIdx);
+                    }
+                  }
+                }
+              }
+            }
+
+            components.push({
+              minX, maxX, minY, maxY,
+              width: maxX - minX + 1,
+              height: maxY - minY + 1,
+              area
+            });
+          }
+        }
+      }
+      return components;
+    };
+
+    // 5. 构建候选矩形池
+    const candidates = [];
+
+    // --- 通道一：Otsu 正向二值化连通域 (用于深色桌面上的浅色身份证) ---
+    const binNormal = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      binNormal[i] = gray[i] >= otsuThresh ? 1 : 0;
+    }
+    const compsNormal = findConnectedComponents(binNormal);
+    candidates.push(...compsNormal.map(c => ({ ...c, source: 'otsu-normal' })));
+
+    // --- 通道二：Otsu 反向二值化连通域 (用于白桌子上的深色卡套/暗身份证) ---
+    const binInverted = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      binInverted[i] = gray[i] < otsuThresh ? 1 : 0;
+    }
+    const compsInverted = findConnectedComponents(binInverted);
+    candidates.push(...compsInverted.map(c => ({ ...c, source: 'otsu-inverted' })));
+
+    // --- 通道三：Sobel 强边缘闭合 + 背景漫水填充 (用于极低对比度、白白对比或纯边缘封闭场景) ---
     const grad = new Float32Array(w * h);
     let maxGrad = 0;
-    let sumGrad = 0;
     for (let y = 1; y < h - 1; y++) {
       for (let x = 1; x < w - 1; x++) {
-        const idx = y * w + x;
-        // x方向梯度
         const gx =
           gray[(y - 1) * w + x + 1] + 2 * gray[y * w + x + 1] + gray[(y + 1) * w + x + 1] -
           (gray[(y - 1) * w + x - 1] + 2 * gray[y * w + x - 1] + gray[(y + 1) * w + x - 1]);
-        // y方向梯度
         const gy =
           gray[(y + 1) * w + x - 1] + 2 * gray[(y + 1) * w + x] + gray[(y + 1) * w + x + 1] -
           (gray[(y - 1) * w + x - 1] + 2 * gray[(y - 1) * w + x] + gray[(y - 1) * w + x - 1]);
-        
         const m = Math.sqrt(gx * gx + gy * gy);
-        grad[idx] = m;
-        sumGrad += m;
+        grad[y * w + x] = m;
         if (m > maxGrad) maxGrad = m;
       }
     }
 
-    const avgGrad = sumGrad / (w * h);
-    // 3. 自适应阈值二值化边缘
-    const threshold = Math.max(30, avgGrad + 0.25 * (maxGrad - avgGrad));
-    const edges = new Uint8Array(w * h);
+    // 提取强边缘 (选择前 15% 强梯度的像素值作为阈值)
+    const nonzeroGrads = [];
     for (let i = 0; i < w * h; i++) {
-      edges[i] = grad[i] > threshold ? 1 : 0;
+      if (grad[i] > 2) nonzeroGrads.push(grad[i]);
+    }
+    nonzeroGrads.sort((a, b) => a - b);
+    const threshIdx = Math.floor(nonzeroGrads.length * 0.85); // 分位数
+    const gradThresh = nonzeroGrads.length > 0 ? nonzeroGrads[threshIdx] : 20;
+
+    const edgeBin = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      edgeBin[i] = grad[i] >= gradThresh ? 1 : 0;
     }
 
-    // 4. 投影密度分析 (Projection Profiles)
-    const projX = new Float32Array(w);
-    const projY = new Float32Array(h);
+    // 3x3 边缘膨胀以连接微小的断点，形成封闭外框
+    const edgeDilated = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
-        if (edges[y * w + x]) {
-          projX[x] += 1;
-          projY[y] += 1;
+        const idx = y * w + x;
+        if (edgeBin[idx] === 1) {
+          edgeDilated[idx] = 1;
+          continue;
         }
+        let hasNeighbor = false;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const ny = y + dy;
+            const nx = x + dx;
+            if (ny >= 0 && ny < h && nx >= 0 && nx < w) {
+              if (edgeBin[ny * w + nx] === 1) {
+                hasNeighbor = true;
+                break;
+              }
+            }
+          }
+          if (hasNeighbor) break;
+        }
+        edgeDilated[idx] = hasNeighbor ? 1 : 0;
       }
     }
 
-    // 平滑滤波器以消除突变噪声
-    const smooth = (arr, windowSize = 7) => {
-      const result = new Float32Array(arr.length);
-      const half = Math.floor(windowSize / 2);
-      for (let i = 0; i < arr.length; i++) {
-        let sum = 0;
-        let count = 0;
-        for (let k = -half; k <= half; k++) {
-          const idx = i + k;
-          if (idx >= 0 && idx < arr.length) {
-            sum += arr[idx];
-            count++;
+    // 从四周边界所有无边缘的点进行漫水填充以提取背景，被边缘阻挡的部分保留为前景
+    const bgMask = new Uint8Array(w * h);
+    const bgQueue = [];
+    
+    // 搜集上下左右边缘的种子点
+    for (let x = 0; x < w; x++) {
+      if (edgeDilated[x] === 0) { bgMask[x] = 1; bgQueue.push(x); }
+      const bottomIdx = (h - 1) * w + x;
+      if (edgeDilated[bottomIdx] === 0 && !bgMask[bottomIdx]) { bgMask[bottomIdx] = 1; bgQueue.push(bottomIdx); }
+    }
+    for (let y = 0; y < h; y++) {
+      const leftIdx = y * w;
+      if (edgeDilated[leftIdx] === 0 && !bgMask[leftIdx]) { bgMask[leftIdx] = 1; bgQueue.push(leftIdx); }
+      const rightIdx = y * w + (w - 1);
+      if (edgeDilated[rightIdx] === 0 && !bgMask[rightIdx]) { bgMask[rightIdx] = 1; bgQueue.push(rightIdx); }
+    }
+
+    // 广度优先漫水填充
+    let bgHead = 0;
+    while (bgHead < bgQueue.length) {
+      const curIdx = bgQueue[bgHead++];
+      const cx = curIdx % w;
+      const cy = Math.floor(curIdx / w);
+
+      const neighbors = [curIdx - 1, curIdx + 1, curIdx - w, curIdx + w];
+      for (const nIdx of neighbors) {
+        if (nIdx >= 0 && nIdx < w * h) {
+          const nx = nIdx % w;
+          const ny = Math.floor(nIdx / w);
+          if (Math.abs(nx - cx) <= 1) {
+            if (edgeDilated[nIdx] === 0 && !bgMask[nIdx]) {
+              bgMask[nIdx] = 1;
+              bgQueue.push(nIdx);
+            }
           }
         }
-        result[i] = sum / count;
       }
-      return result;
-    };
-
-    const sProjX = smooth(projX, 9);
-    const sProjY = smooth(projY, 9);
-
-    // 寻找起止点：提取投影密度高于最大值12%且非边缘死角的连通区域
-    const findBoundaries = (proj, maxVal, minPct = 0.12) => {
-      const thresh = maxVal * minPct;
-      let start = 0;
-      let end = proj.length - 1;
-      const trimBorder = Math.floor(proj.length * 0.05);
-      for (let i = trimBorder; i < proj.length - trimBorder; i++) {
-        if (proj[i] > thresh) {
-          start = i;
-          break;
-        }
-      }
-      for (let i = proj.length - 1 - trimBorder; i >= trimBorder; i--) {
-        if (proj[i] > thresh) {
-          end = i;
-          break;
-        }
-      }
-      return { start, end };
-    };
-
-    const maxValX = Math.max(...sProjX);
-    const maxValY = Math.max(...sProjY);
-    
-    // 如果无显著边缘直接返回失败
-    if (maxValX < 3 || maxValY < 3) {
-      return { success: false };
     }
 
-    const boundX = findBoundaries(sProjX, maxValX, 0.12);
-    const boundY = findBoundaries(sProjY, maxValY, 0.12);
+    // 提取前景非背景区域（即 bgMask 为 0 的闭合漏洞区域）
+    const fgBin = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      fgBin[i] = bgMask[i] === 0 ? 1 : 0;
+    }
+    const compsEdgeHole = findConnectedComponents(fgBin);
+    candidates.push(...compsEdgeHole.map(c => ({ ...c, source: 'edge-hole' })));
 
-    const rectW = boundX.end - boundX.start;
-    const rectH = boundY.end - boundY.start;
+    // 6. 多维度评估与打分体系
+    let bestCandidate = null;
+    let maxScore = -1;
 
-    // 5. 比例与合理性过滤
-    const ratio = rectW / rectH;
-    const areaPct = (rectW * rectH) / (w * h);
+    for (const comp of candidates) {
+      // A. 宽高比打分 (身份证 1.586，合理比例容差 [1.1, 2.1])
+      const ratio = comp.width / comp.height;
+      const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio; // 完美兼容竖版拍摄的转换
+      if (ratioNorm < 1.1 || ratioNorm > 2.1) continue;
 
-    // 身份证物理比例为 1.58。合理识别比例区间为 [1.25, 1.95]
-    // 面积必须达到画布总面积的 12% 以上以防误判背景噪点
-    if (ratio >= 1.25 && ratio <= 1.95 && areaPct >= 0.12) {
-      // 还原到原始图片的绝对坐标
+      const diff = Math.abs(ratioNorm - 1.586);
+      const scoreRatio = Math.max(0, 1.0 - diff / 0.4); // 越接近 1.586 得分越高
+
+      // B. 面积合理性打分 (占比全图的 8% ~ 85%)
+      const areaPct = (comp.width * comp.height) / (w * h);
+      if (areaPct < 0.08 || areaPct > 0.85) continue;
+      // 倾向于面积中等偏大的矩形 (避开噪点，一般身份证在中心占据 20%~60% 面积)
+      const scoreArea = areaPct;
+
+      // C. 图像中心契合度打分 (拍照身份证一般位于图像中央)
+      const cx = comp.minX + comp.width / 2;
+      const cy = comp.minY + comp.height / 2;
+      const distToCenter = Math.sqrt((cx - w / 2) ** 2 + (cy - h / 2) ** 2);
+      const maxDist = Math.sqrt((w / 2) ** 2 + (h / 2) ** 2);
+      const scoreCenter = 1.0 - distToCenter / maxDist;
+
+      // D. 连通域内部实心填充率过滤 (防止空心细线)
+      const fillRatio = comp.area / (comp.width * comp.height);
+      if (fillRatio < 0.45) continue;
+
+      // 加权综合得分：宽高比(45%) + 中心度(30%) + 面积合理度(25%)
+      const totalScore = scoreRatio * 0.45 + scoreCenter * 0.3 + scoreArea * 0.25;
+
+      if (totalScore > maxScore) {
+        maxScore = totalScore;
+        bestCandidate = comp;
+      }
+    }
+
+    // 7. 导出最终结果 (如果评分达到基础合理度阈值 0.40)
+    if (bestCandidate && maxScore >= 0.40) {
       const scaleX = img.width / w;
       const scaleY = img.height / h;
       return {
         success: true,
-        x: Math.round(boundX.start * scaleX),
-        y: Math.round(boundY.start * scaleY),
-        width: Math.round(rectW * scaleX),
-        height: Math.round(rectH * scaleY)
+        x: Math.round(bestCandidate.minX * scaleX),
+        y: Math.round(bestCandidate.minY * scaleY),
+        width: Math.round(bestCandidate.width * scaleX),
+        height: Math.round(bestCandidate.height * scaleY),
+        score: maxScore,
+        source: bestCandidate.source
       };
     }
 

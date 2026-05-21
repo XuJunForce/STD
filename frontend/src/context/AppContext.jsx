@@ -2,9 +2,19 @@ import React, { createContext, useState, useEffect, useContext } from 'react';
 
 const AppContext = createContext();
 
-// No active categories/tools needed for base view since logs is a premium standalone panel
-const INITIAL_CATEGORIES = [];
-const INITIAL_TOOLS = {};
+// Register graphics and system monitoring categories and tools
+const INITIAL_CATEGORIES = [
+  { id: 'graphics', name: '图形图像', icon: '🎨' },
+  { id: 'system', name: '系统监控', icon: '⚙️' }
+];
+const INITIAL_TOOLS = {
+  graphics: [
+    { id: 'id-card-scanner', name: '身份证扫描复印', desc: '将身份证正反面高保真拼接排版到A4 PDF中，支持防伪水印与微调', icon: '🪪' }
+  ],
+  system: [
+    { id: 'logs', name: '全链路追踪日志', desc: '平台级日志遥测与三色调用链看板', icon: '👁️' }
+  ]
+};
 
 // Generate a high-fidelity random session ID for user path tracing
 const generateSessionId = () => {
@@ -14,10 +24,11 @@ const generateSessionId = () => {
 export const AppProvider = ({ children }) => {
   const [categories] = useState(INITIAL_CATEGORIES);
   const [tools] = useState(INITIAL_TOOLS);
-  const [activeCategory, setActiveCategory] = useState('');
-  const [activeTool, setActiveTool] = useState('');
-  const [sidebarExpanded, setSidebarExpanded] = useState(false); // Collapse sidebar as default since no categories
+  const [activeCategory, setActiveCategory] = useState('graphics');
+  const [activeTool, setActiveTool] = useState('id-card-scanner');
+  const [sidebarExpanded, setSidebarExpanded] = useState(true); // Expand sidebar by default since tools exist
   const [sessionId] = useState(generateSessionId());
+
   
   // Settings & Theme control states
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);

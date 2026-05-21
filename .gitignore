@@ -1,0 +1,29 @@
+# Python
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.toast
+.cache
+backend/cache/
+
+# Node/Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# OS
+.DS_Store
+
+# Test files
+test_front.jpg
+test_back.jpg
+test_output_1to1.pdf
+test_output_fit.pdf

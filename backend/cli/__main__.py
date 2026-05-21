@@ -8,6 +8,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from backend.cli import logs
+from backend.cli import id_card
 
 def main():
     parser = argparse.ArgumentParser(
@@ -19,15 +20,19 @@ def main():
     
     # Register command modules here
     logs.register(subparsers)
+    id_card.register(subparsers)
     
     args = parser.parse_args()
     
     # Dispatch handler based on subcommand
     if args.subcommand == "logs":
         logs.handle(args)
+    elif args.subcommand == "id-card":
+        id_card.handle(args)
     else:
         parser.print_help()
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

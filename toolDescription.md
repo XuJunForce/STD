@@ -142,4 +142,50 @@
 
 ## 应用工具列表 (Application Tools)
 
-*(当前暂无活跃应用工具。所有 mock 工具已全部移除，等待后续按需逐步开发与注册。)*
+### 身份证扫描复印
+- **工具 ID**: `id-card-scanner`
+- **所属分类**: `graphics`
+- **显示图标**: `🪪`
+- **功能简述**: 智能拼接身份证正反面至一张 A4 页面 PDF，支持像素级安全防伪水印、黑白/高对比度色彩模式调节，且完美支持 1:1 原大物理比例。
+
+#### 1. 前端实现
+- **组件路径**: `frontend/src/components/IdCardScanner.jsx`
+- **UI 布局**: 左右分栏布局。左侧为正反面上传与旋转操作槽（包含极其精美的 iPhone 连续互通扫描步骤指引），下方为排版参数控制面板。右侧为所见即所得 A4 实时 Canvas 物理预览与生成后嵌入式 PDF 交互层。
+- **交互逻辑**: 支持拖拽上传与剪贴板图片直接粘贴。用户修改参数滑块时右侧 A4 物理 Canvas 瞬时无缝重绘，生成后可一键下载或静默打印。
+
+#### 2. 后端 API
+- **API 路径**: `/api/v1/id-card/generate`（生成）与 `/api/v1/id-card/download/{file_id}`（下载/预览）
+- **请求方法**: `POST`（上传流与表单配置）及 `GET`（流式输出 PDF）
+- **请求参数**:
+  ```json
+  {
+    "front_image": "UploadFile",
+    "back_image": "UploadFile",
+    "watermark_text": "str",
+    "color_mode": "str (original | grayscale | monochrome)",
+    "print_scale": "str (1to1 | fit)",
+    "session_id": "str"
+  }
+  ```
+- **返回数据**:
+  ```json
+  {
+    "code": 0,
+    "message": "success",
+    "data": {
+      "file_id": "cache_key_string",
+      "download_url": "/api/v1/id-card/download/cache_key",
+      "file_name": "身份证复印件.pdf"
+    }
+  }
+  ```
+
+#### 3. 缓存策略
+- **缓存类型**: 本地文件存储缓存 (`backend/cache/`)
+- **哈希字段**: 正反面图片文件 MD5 + 表单处理参数 SHA-256
+- **TTL**: 30 分钟，总容量 100MB 限额，按 LRU 机制淘汰
+- **隐私级别**: 全局缓存隔离（防信息泄露）
+
+#### 4. CLI 命令行调用
+- **命令格式**: `./mini-tool id-card --front <front_path> --back <back_path> [options]`
+- **示例**: `./mini-tool id-card --front ./test_front.jpg --back ./test_back.jpg --output ./test_output_1to1.pdf --watermark "测试"`

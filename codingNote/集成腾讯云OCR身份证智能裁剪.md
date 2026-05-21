@@ -1,138 +1,120 @@
-# 编码笔记：集成腾讯云 OCR 身份证智能裁剪与双轨高可用系统
+# 编码笔记：集成腾讯云 OCR 与本地 OpenCV 3D 透视矫正三级金字塔高可用系统
 
 ## 1. 功能说明
-为了向用户提供金融级、高精度、免受倾斜反光和梯形失真干扰的身份证裁剪与 A4 拼接复印体验，本次开发将**腾讯云身份证识别接口 (IDCardOCR)** 无缝接入系统，打造了 Web 应用与本地批处理脚本的“双轨双通道”高可用系统：
-1. **云端 AI 智能扶正与纠偏**:
+为了向用户提供金融级、高精度、免受倾斜反光和梯形失真干扰的身份证裁剪与 A4 拼接复印体验，本次开发将**腾讯云身份证识别接口 (IDCardOCR)** 无缝接入系统，并结合本地 OpenCV 算法，打造了 Web 应用与本地批处理脚本的“三级金字塔”式高可用系统：
+1. **第一防线：云端 AI 智能扶正与纠偏**:
    - 后端集成腾讯云 SDK。当开启云端 AI 功能时，上传的高分辨率身份证原图会自动发送至腾讯云 `IDCardOCR`。
    - 利用其强大的云端计算机视觉算法，智能去掉证件外多余的边缘、自动矫正拍摄角度（实现 360 度扶正），并返回完美的正交直立裁剪身份证图像 Base64。
-2. **Web 端高可用退避降级防线**:
-   - 在 API 路由与 `id_card_service` 中集成了极其稳固的 try-except 降级链。
-   - 若用户的 `.env` 中未配置腾讯 API 密钥、网络请求超时或腾讯云接口限频报错，系统不会崩溃，而是会自动无缝地退避到本地的 **OpenCV.js WebAssembly / Pillow 算法防线**，确保 100% 成功生成 A4 副本。
-3. **极简极美前端 UI 开关与呼吸灯**:
+2. **第二防线：本地 OpenCV 智能抠图与 3D 透视矫正**:
+   - 如果云端 AI 识别由于网络超时、频控或者没有配置 API 密钥报错，批处理脚本 `main.py` 会自动无缝过渡至**第二层本地 OpenCV 算法防御**。
+   - 利用 Canny 多阈值算子合并检测物理边缘，结合多精度多边形轮廓拟合逼近（支持 4~6 边形并由最小外接矩形 `minAreaRect` 拟合 4 角点），排除干扰背景，基于宽高比与面积得分获取黄金身份证位置坐标。
+   - 最终使用极坐标顶点时针排序与 `getPerspectiveTransform` + `warpPerspective` 完成极致精细的 **3D 射影几何逆变换拉平扶正抠图**！
+3. **第三防线：本地 Pillow 居中等比裁剪保底**:
+   - 在极端反光、背景极端复杂导致本地 OpenCV 也无法检出高置信度边缘轮廓的情况下，系统会自动进入**第三层 Pillow 物理保底防线**，执行等比居中裁剪，百分百确保拼合大图任务能够 100% 成功生成。
+4. **极美前端 UI 开关与呼吸灯**：
    - 在前端配置面板中增加磨砂玻璃高质感的“云端 AI 辅助 (智能裁剪与纠偏)”开关，配备微动效与专属的状态呼吸指示灯。
-   - 当启用云端 AI 裁剪时，前端自动选择原始高清像素流上传，规避本地预裁剪对云端识别率的影响。
-4. **根目录批量处理命令行工具开发 (`main.py`)**:
-   - 在项目根目录下独立开发了高健壮性的批处理拼版工具 `main.py`。
-   - 支持从 `.env` 安全读取密钥，自动对输入目录下的所有图片按照其**纯数字编号数值大小进行升序排序**（偶数自动归入正面，奇数自动归入反面）。
-   - 双重调用腾讯云 OCR API 剪裁，最后在内存中以 300 DPI (2481 × 3510) 物理 A4 尺寸拼合排版导出，且在云端异常时自动启用 `local_crop_and_resize` 本地居中等比裁剪兜底，保证拼版绝对不中断。
+5. **极速包管理器集成 (`uv`)**：
+   - 依赖项通过 `uv` 瞬时加锁安装至后端项目环境，包含 `opencv-python==4.13.0.92` 与 `numpy==2.4.6`，为本地 3D 抠图纠偏算法提供了极致的底层运算支撑。
 
 ---
 
 ## 2. 关键代码
 
-### 后端核心集成与高可用兜底 (`backend/services/id_card_service.py`)
-在 `process_and_generate_pdf` 主生成逻辑中，对 `use_tencent_ocr` 参数进行动态拦截，并在云端裁剪失败时友好输出日志、自动回退到本地：
+### 本地 OpenCV 3D 透视纠偏扶正算法 (`main.py`)
+利用 OpenCV 的高级计算机视觉算子实现本地高精矫正，即使倾斜拍摄也能强力扶正：
 
 ```python
-def crop_image_via_tencent_ocr(img_bytes: bytes, side: str) -> bytes:
-    """调用腾讯云 OCR API 裁剪身份证并做自动倾斜校正，返回裁剪后的图片 bytes。
-    如果密钥未配置、接口报错或任何异常，则抛出异常，由上层捕获并平滑降级。
-    """
-    secret_id = os.getenv("TENCENTCLOUD_SECRET_ID", "").strip()
-    secret_key = os.getenv("TENCENTCLOUD_SECRET_KEY", "").strip()
-    
-    if not secret_id or not secret_key:
-        raise ValueError("Tencent Cloud SecretId/SecretKey not configured in .env file.")
-        
-    img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-    
-    cred = credential.Credential(secret_id, secret_key)
-    httpProfile = HttpProfile()
-    httpProfile.endpoint = "ocr.tencentcloudapi.com"
-    
-    clientProfile = ClientProfile()
-    clientProfile.httpProfile = httpProfile
-    client = ocr_client.OcrClient(cred, "ap-guangzhou", clientProfile)
-    
-    req = models.IDCardOCRRequest()
-    card_side = "FRONT" if side.upper() == "FRONT" else "BACK"
-    params = {
-        "ImageBase64": img_b64,
-        "CardSide": card_side,
-        "Config": json.dumps({"CropIdCard": True, "CropPortrait": False})
-    }
-    req.from_json_string(json.dumps(params))
-    
-    resp = client.IDCardOCR(req)
-    resp_json = json.loads(resp.to_json_string())
-    
-    advanced_info_str = resp_json.get("AdvancedInfo")
-    if not advanced_info_str:
-        raise ValueError("AdvancedInfo not returned from Tencent Cloud OCR API.")
-        
-    advanced_info = json.loads(advanced_info_str)
-    cropped_b64 = advanced_info.get("IdCard")
-    if not cropped_b64:
-        raise ValueError("IdCard cropped image base64 not found in AdvancedInfo.")
-        
-    return base64.b64decode(cropped_b64)
+def order_points(pts):
+    """将四个点排序为：左上、右上、右下、左下"""
+    rect = np.zeros((4, 2), dtype="float32")
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]   # 左上
+    rect[2] = pts[np.argmax(s)]   # 右下
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]  # 右上
+    rect[3] = pts[np.argmax(diff)]  # 左下
+    return rect
 
-# process_and_generate_pdf 内部降级流：
-if use_tencent_ocr:
-    try:
-        front_cropped = crop_image_via_tencent_ocr(front_bytes, "FRONT")
-        front_bytes = front_cropped
-        print("🔥 [Tencent OCR] Front image cropped and deskewed successfully.")
-    except Exception as e:
-        print(f"⚠️ [Tencent OCR] Front crop failed: {e}. Falling back to original/local crop.")
+def four_point_transform(image, pts):
+    """射影几何逆变换"""
+    rect = order_points(pts)
+    tl, tr, br, bl = rect
+    width_a = np.linalg.norm(br - bl)
+    width_b = np.linalg.norm(tr - tl)
+    max_width = int(max(width_a, width_b))
+    height_a = np.linalg.norm(tr - br)
+    height_b = np.linalg.norm(tl - bl)
+    max_height = int(max(height_a, height_b))
+    dst = np.array([
+        [0, 0],
+        [max_width - 1, 0],
+        [max_width - 1, max_height - 1],
+        [0, max_height - 1]
+    ], dtype="float32")
+    matrix = cv2.getPerspectiveTransform(rect, dst)
+    return cv2.warpPerspective(image, matrix, (max_width, max_height))
+
+def local_opencv_crop_and_resize(src_path, dest_path):
+    """边缘检测与透视变换"""
+    image = cv2.imread(src_path)
+    original = image.copy()
+    img_area = image.shape[0] * image.shape[1]
     
-    try:
-        back_cropped = crop_image_via_tencent_ocr(back_bytes, "BACK")
-        back_bytes = back_cropped
-        print("🔥 [Tencent OCR] Back image cropped and deskewed successfully.")
-    except Exception as e:
-        print(f"⚠️ [Tencent OCR] Back crop failed: {e}. Falling back to original/local crop.")
-```
-
-### 批处理脚本中的数值排序与本地居中裁剪降级 (`main.py`)
-在命令行批处理脚本中，实现了根据数字大小自然排序，并新增了 `local_crop_and_resize` 用以防止无密钥或云端宕机时的报错崩溃：
-
-```python
-def get_sorted_numeric_images(root_dir="."):
-    """搜索目录下所有以数字命名的图片文件，并按数值升序排序"""
-    img_list = []
-    valid_exts = ('.bmp', '.dib', '.png', '.jpg', '.jpeg', '.pbm', '.pgm', '.ppm', '.tif', '.tiff', '.webp')
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
     
-    for entry in os.scandir(root_dir):
-        if entry.is_file() and entry.name.lower().endswith(valid_exts):
-            base_name = os.path.splitext(entry.name)[0]
-            if re.match(r'^\d+$', base_name):
-                num_val = int(base_name)
-                img_list.append((num_val, entry.path))
-                
-    img_list.sort(key=lambda x: x[0])
-    return [item[1] for item in img_list]
-
-def local_crop_and_resize(src_path, dest_path):
-    """本地居中等比裁剪并缩放到 1063 x 710，保存为 300 DPI"""
-    with Image.open(src_path) as img:
-        img_w, img_h = img.size
-        target_ratio = 1063 / 710
-        current_ratio = img_w / img_h
+    # 边缘缝合
+    edges1 = cv2.Canny(blur, 30, 100)
+    edges2 = cv2.Canny(blur, 50, 150)
+    edges3 = cv2.Canny(blur, 75, 200)
+    edges = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    edges = cv2.dilate(edges, kernel, iterations=1)
+    
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+    
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < img_area * 0.03: continue
+        peri = cv2.arcLength(cnt, True)
+        for epsilon_factor in [0.02, 0.03, 0.04, 0.05]:
+            approx = cv2.approxPolyDP(cnt, epsilon_factor * peri, True)
+            if 4 <= len(approx) <= 6:
+                if len(approx) > 4:
+                    rect = cv2.minAreaRect(cnt)
+                    box = cv2.boxPoints(rect)
+                    pts = np.intp(box)
+                else:
+                    pts = approx.reshape(-1, 2)
+                x, y, w, h = cv2.boundingRect(pts)
+                ratio = max(w, h) / min(w, h)
+                if 1.3 <= ratio <= 2.0:
+                    score = area * (1.0 - abs(ratio - 1.586) / 1.586)
+                    candidates.append((score, pts))
+                    break
+                    
+    if not candidates:
+        raise ValueError("未检测到合适的身份证边缘。")
         
-        if current_ratio > target_ratio:
-            # 原始图片过宽，需要裁掉左右边缘
-            new_w = int(img_h * target_ratio)
-            left = (img_w - new_w) // 2
-            right = left + new_w
-            img_cropped = img.crop((left, 0, right, img_h))
-        else:
-            # 原始图片过高，需要裁掉上下边缘
-            new_h = int(img_w / target_ratio)
-            top = (img_h - new_h) // 2
-            bottom = top + new_h
-            img_cropped = img.crop((0, top, img_w, bottom))
-            
-        img_resized = img_cropped.resize((1063, 710), Image.Resampling.LANCZOS)
-        img_resized = img_resized.convert('RGB')
-        img_resized.save(dest_path, dpi=(300, 300))
-        img_cropped.close()
+    candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+    card_pts = candidates[0][1]
+    cropped = four_point_transform(original, card_pts)
+    
+    h, w = cropped.shape[:2]
+    if h > w:
+        cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
+        
+    cropped_resized = cv2.resize(cropped, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
+    cv2.imwrite(dest_path, cropped_resized)
 ```
 
 ---
 
 ## 3. 注意事项
-1. **依赖升级提醒**: 批处理脚本依赖 Pillow 和 tencentcloud-sdk-python。如果在纯净环境运行，建议使用 `uv run --project backend python main.py`，因为后端依赖环境已集成并加锁，也可以直接使用提示进行手动 `pip install`。
-2. **安全隔离策略**: 必须统一将腾讯云 `SecretId` 和 `SecretKey` 放置于根目录的 `.env` 变量配置文件中，绝不应为了贪图简便而将其硬编码写入 python 代码里，防范敏感密钥泄露。
-3. **QPS 保护限流**: 腾讯云免费/基础级别的 OCR 识别通常有 QPS 限制，在 `main.py` 批量调用及 Web 端的处理链路中均设置了 `time.sleep(0.5)` 的适度延时保护，避免突发高频调用触发频控拦截。
-4. **数字配对要求**: 批处理工具在处理数字图片时，图片总数必须为 2 的倍数（两两正反配对），且偶数编号代表正面，奇数编号代表反面，从 0 开始。
+1. **多级金字塔调用设计**: 在 `main.py` 内部对 OpenCV 库采取了 `try-except` 导入保护，并用 `HAS_OPENCV` 标记状态。即使在没有安装 `opencv-python` 的精简环境中，程序也能优雅且安全地直接落到 Pillow 第三层防线执行拼接，做到了绝对的高可用。
+2. **QPS 与保护控制**: 对腾讯云 OCR 的免费套餐进行了 `time.sleep(0.5)` 的限频保护。
+3. **数字配对硬性限制**: 批处理脚本要求偶数编号图为正面，奇数编号图为反面，且图片对数量必须为 2 的倍数。

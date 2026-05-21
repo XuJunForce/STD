@@ -3,12 +3,19 @@ import os
 import time
 import hashlib
 import json
+import base64
 from pathlib import Path
 from typing import Dict, Any, Tuple
 from PIL import Image, ImageEnhance, ImageDraw, ImageFont
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
+
+from tencentcloud.common import credential
+from tencentcloud.common.profile.client_profile import ClientProfile
+from tencentcloud.common.profile.http_profile import HttpProfile
+from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
+from tencentcloud.ocr.v20181119 import ocr_client, models
 
 from backend.services.db_service import SessionLocal
 from backend.services.log_service import log_invocation
@@ -70,6 +77,56 @@ def get_system_font(size: int = 20) -> ImageFont.ImageFont:
                 continue
     # 终极保底
     return ImageFont.load_default()
+
+def crop_image_via_tencent_ocr(img_bytes: bytes, side: str) -> bytes:
+    """调用腾讯云 OCR API 裁剪身份证并做自动角校正，返回裁剪后的图片 bytes。
+    如果密钥未配置、接口报错或任何异常，则抛出异常，由上层捕获并平滑降级。
+    """
+    secret_id = os.getenv("TENCENTCLOUD_SECRET_ID", "").strip()
+    secret_key = os.getenv("TENCENTCLOUD_SECRET_KEY", "").strip()
+    
+    if not secret_id or not secret_key:
+        raise ValueError("Tencent Cloud SecretId/SecretKey not configured in .env file.")
+        
+    # 将输入 bytes 转换为 base64
+    img_b64 = base64.b64encode(img_bytes).decode('utf-8')
+    
+    # 初始化腾讯云凭证与客户端
+    cred = credential.Credential(secret_id, secret_key)
+    httpProfile = HttpProfile()
+    httpProfile.endpoint = "ocr.tencentcloudapi.com"
+    
+    clientProfile = ClientProfile()
+    clientProfile.httpProfile = httpProfile
+    client = ocr_client.OcrClient(cred, "ap-guangzhou", clientProfile)
+    
+    req = models.IDCardOCRRequest()
+    
+    # 构造请求参数
+    card_side = "FRONT" if side.upper() == "FRONT" else "BACK"
+    params = {
+        "ImageBase64": img_b64,
+        "CardSide": card_side,
+        "Config": json.dumps({"CropIdCard": True, "CropPortrait": False})
+    }
+    req.from_json_string(json.dumps(params))
+    
+    # 发送请求
+    resp = client.IDCardOCR(req)
+    resp_json = json.loads(resp.to_json_string())
+    
+    # 提取裁剪后的 Base64 数据
+    advanced_info_str = resp_json.get("AdvancedInfo")
+    if not advanced_info_str:
+        raise ValueError("AdvancedInfo not returned from Tencent Cloud OCR API.")
+        
+    advanced_info = json.loads(advanced_info_str)
+    cropped_b64 = advanced_info.get("IdCard")
+    if not cropped_b64:
+        raise ValueError("IdCard cropped image base64 not found in AdvancedInfo.")
+        
+    # 解码返回 bytes
+    return base64.b64decode(cropped_b64)
 
 def enhance_image(
     img_bytes: bytes,
@@ -182,6 +239,9 @@ def process_and_generate_pdf(
     front_rotate = int(params.get("front_rotate", 0))
     back_rotate = int(params.get("back_rotate", 0))
     print_scale = params.get("print_scale", "1to1")  # 1to1 (1:1 打印原大) | fit (自适应最大化铺满)
+    use_tencent_ocr = params.get("use_tencent_ocr", False)
+    if isinstance(use_tencent_ocr, str):
+        use_tencent_ocr = use_tencent_ocr.lower() in ("true", "1", "yes")
 
     status = "success"
     error_msg = None
@@ -189,7 +249,7 @@ def process_and_generate_pdf(
     pdf_bytes = b""
     
     # 1. 缓存匹配机制 (基于图片内容哈希 + 所有参数)
-    param_hash_str = f"{watermark_text}_{watermark_opacity}_{watermark_color}_{layout}_{color_mode}_{brightness}_{contrast}_{front_rotate}_{back_rotate}_{print_scale}"
+    param_hash_str = f"{watermark_text}_{watermark_opacity}_{watermark_color}_{layout}_{color_mode}_{brightness}_{contrast}_{front_rotate}_{back_rotate}_{print_scale}_{use_tencent_ocr}"
     front_md5 = hashlib.md5(front_bytes).hexdigest()
     back_md5 = hashlib.md5(back_bytes).hexdigest()
     
@@ -227,6 +287,22 @@ def process_and_generate_pdf(
             pass  # 如果缓存读取失败，降级重新生成
             
     try:
+        # 1.5. 如果启用了腾讯云 OCR 且配置了密钥，在画面微调前执行云端智能裁剪纠偏
+        if use_tencent_ocr:
+            try:
+                front_cropped = crop_image_via_tencent_ocr(front_bytes, "FRONT")
+                front_bytes = front_cropped
+                print("🔥 [Tencent OCR] Front image cropped and deskewed successfully.")
+            except Exception as e:
+                print(f"⚠️ [Tencent OCR] Front crop failed: {e}. Falling back to original/local crop.")
+            
+            try:
+                back_cropped = crop_image_via_tencent_ocr(back_bytes, "BACK")
+                back_bytes = back_cropped
+                print("🔥 [Tencent OCR] Back image cropped and deskewed successfully.")
+            except Exception as e:
+                print(f"⚠️ [Tencent OCR] Back crop failed: {e}. Falling back to original/local crop.")
+
         # 2. 图像增强与色彩变换
         front_enhanced = enhance_image(front_bytes, front_rotate, brightness, contrast, color_mode)
         back_enhanced = enhance_image(back_bytes, back_rotate, brightness, contrast, color_mode)

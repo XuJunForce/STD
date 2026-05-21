@@ -27,3 +27,12 @@ test_front.jpg
 test_back.jpg
 test_output_1to1.pdf
 test_output_fit.pdf
+
+# Script generated dirs
+tmp/
+output/
+
+# Credentials
+.env
+
+

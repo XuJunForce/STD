@@ -517,6 +517,7 @@ export default function IdCardScanner() {
   const [backRotate, setBackRotate] = useState(0); // 0, 90, 180, 270
   const [printScale, setPrintScale] = useState('1to1'); // 1to1 | fit
   const [fileName, setFileName] = useState('身份证复印件.pdf');
+  const [useTencentOcr, setUseTencentOcr] = useState(false);
 
   // 保存正反面各自动/手动微调的裁剪缩放与平移参数
   const [frontCropParams, setFrontCropParams] = useState({ zoom: 1.0, offset: { x: 0, y: 0 } });
@@ -1035,8 +1036,10 @@ export default function IdCardScanner() {
     setGeneratedPdf(null);
 
     const formData = new FormData();
-    formData.append('front_image', frontFile);
-    formData.append('back_image', backFile);
+    const finalFrontImage = useTencentOcr ? (frontOriginal || frontFile) : frontFile;
+    const finalBackImage = useTencentOcr ? (backOriginal || backFile) : backFile;
+    formData.append('front_image', finalFrontImage);
+    formData.append('back_image', finalBackImage);
     formData.append('watermark_text', watermarkText);
     formData.append('watermark_opacity', watermarkOpacity);
     formData.append('watermark_color', watermarkColor);
@@ -1049,6 +1052,7 @@ export default function IdCardScanner() {
     formData.append('print_scale', printScale);
     formData.append('file_name', fileName);
     formData.append('session_id', sessionId);
+    formData.append('use_tencent_ocr', useTencentOcr ? 'true' : 'false');
 
     // 进度模拟
     const progressInterval = setInterval(() => {
@@ -1154,18 +1158,29 @@ export default function IdCardScanner() {
           
           {/* AI 引擎状态栏 */}
           <div className="ai-engine-status-bar">
-            <span className={`status-indicator-dot ${isOpenCvLoaded ? 'loaded' : 'loading'}`}></span>
-            <span className="status-indicator-text">
-              {isOpenCvLoaded ? (
-                <>
-                  <span className="sparkle-icon">✨</span> AI 智能 3D 透视纠偏已就绪
-                </>
-              ) : (
-                <>
-                  <span className="spinner-icon">⏳</span> AI 引擎加载中... (已开启自研算法兜底)
-                </>
-              )}
-            </span>
+            {useTencentOcr ? (
+              <>
+                <span className="status-indicator-dot tencent-active"></span>
+                <span className="status-indicator-text">
+                  <span className="sparkle-icon">☁️</span> 腾讯云端 AI 高精拉平与纠偏通道已开启 (基于 OCR 引擎)
+                </span>
+              </>
+            ) : (
+              <>
+                <span className={`status-indicator-dot ${isOpenCvLoaded ? 'loaded' : 'loading'}`}></span>
+                <span className="status-indicator-text">
+                  {isOpenCvLoaded ? (
+                    <>
+                      <span className="sparkle-icon">✨</span> AI 智能 3D 透视纠偏已就绪
+                    </>
+                  ) : (
+                    <>
+                      <span className="spinner-icon">⏳</span> AI 引擎加载中... (已开启自研算法兜底)
+                    </>
+                  )}
+                </span>
+              </>
+            )}
           </div>
 
           {/* 上传区域 */}
@@ -1383,6 +1398,20 @@ export default function IdCardScanner() {
                     />
                   </div>
                 </div>
+              </div>
+
+              {/* 云端 AI 高精纠偏 (腾讯云 OCR) */}
+              <div className="opt-group tencent-group">
+                <label className="opt-label">云端 AI 辅助 (智能裁剪与纠偏)</label>
+                <button 
+                  type="button"
+                  className={`tencent-ocr-btn ${useTencentOcr ? 'active' : ''}`}
+                  onClick={() => setUseTencentOcr(!useTencentOcr)}
+                >
+                  <span className="ai-badge">CLOUD AI</span>
+                  {useTencentOcr ? '🔮 已启用腾讯云端高精纠偏' : '💤 开启腾讯云端高精纠偏'}
+                </button>
+                <span className="opt-hint">启用后将上传原图，由腾讯云端 OCR 神经网络进行多余边缘自适应裁边与角度极速扶正（需后台配置 API 密钥）。</span>
               </div>
 
               {/* 保存文件名 */}

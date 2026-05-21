@@ -1115,3 +1115,95 @@ input[type="range"]::-webkit-slider-thumb:hover {
   }
 }
 
+
+
+/* ==========================================
+   ☁️ Tencent Cloud OCR Integration Styles
+   ========================================== */
+
+.status-indicator-dot.tencent-active {
+  background: #A352FC;
+  box-shadow: 0 0 10px #A352FC, 0 0 20px rgba(163, 82, 252, 0.4);
+  animation: status-pulse-purple 2s infinite ease-in-out;
+}
+
+@keyframes status-pulse-purple {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(163, 82, 252, 0.7);
+  }
+  70% {
+    transform: scale(1.15);
+    box-shadow: 0 0 0 6px rgba(163, 82, 252, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(163, 82, 252, 0);
+  }
+}
+
+.tencent-group {
+  margin-top: 5px;
+}
+
+.tencent-ocr-btn {
+  width: 100%;
+  padding: 12px 16px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  backdrop-filter: blur(10px);
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.tencent-ocr-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(163, 82, 252, 0.3);
+  color: var(--text-primary);
+  box-shadow: 0 0 15px rgba(163, 82, 252, 0.1);
+}
+
+.tencent-ocr-btn:active {
+  transform: scale(0.98);
+}
+
+.tencent-ocr-btn.active {
+  background: linear-gradient(135deg, #A352FC 0%, #7011E4 100%);
+  border-color: transparent;
+  color: #FFFFFF;
+  font-weight: 700;
+  box-shadow: 0 4px 20px rgba(112, 17, 228, 0.4), inset 0 1px 1px rgba(255, 255, 255, 0.2);
+}
+
+.ai-badge {
+  font-size: 0.65rem;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.15);
+  color: var(--text-title);
+  padding: 2px 6px;
+  border-radius: 4px;
+  letter-spacing: 0.5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: inline-block;
+  transition: all 0.3s ease;
+}
+
+.tencent-ocr-btn.active .ai-badge {
+  background: rgba(255, 255, 255, 0.25);
+  border-color: rgba(255, 255, 255, 0.3);
+}
+
+.opt-hint {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  line-height: 1.4;
+  margin-top: 2px;
+}

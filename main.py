@@ -147,15 +147,17 @@ def crop_by_grabcut(image):
 
     _, x, y, w, h = sorted(candidates, reverse=True, key=lambda item: item[0])[0]
     
-    # 向内收缩 2.5% 以去除 GrabCut 边界可能带有的背景毛边与虚影
-    inset_px_w = int(w * 0.025)
-    inset_px_h = int(h * 0.025)
+    # 先规范扩展到标准身份证比例
+    x, y, w, h = expand_to_id_card_rect(x, y, w, h, img_w, img_h)
+    
+    # 接着对已符合标准比例的包围盒进行等比强力收缩 3.5%，防阻边缘杂色
+    inset_px_w = int(w * 0.035)
+    inset_px_h = int(h * 0.035)
     x += inset_px_w
     y += inset_px_h
     w -= inset_px_w * 2
     h -= inset_px_h * 2
 
-    x, y, w, h = expand_to_id_card_rect(x, y, w, h, img_w, img_h)
     if w <= 0 or h <= 0:
         return None
 
@@ -275,8 +277,8 @@ def crop_id_card(image_path, output_path="id_card_crop.jpg", debug=False):
 
     card_pts = best_candidate[3]
 
-    # 7. 透视矫正并裁剪
-    shrunk_pts = shrink_quad(card_pts, factor=0.96)
+    # 7. 透视矫正并裁剪，将四角收缩比例调升至 5.5%，规避阴影
+    shrunk_pts = shrink_quad(card_pts, factor=0.945)
     cropped = four_point_transform(original, shrunk_pts)
 
     # 如果裁剪后是竖着的，可以自动转正

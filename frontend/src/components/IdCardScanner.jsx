@@ -137,15 +137,16 @@ function detectCardByGrabCut(cv, src) {
     candidates.sort((a, b) => b.score - a.score);
     const best = candidates[0];
     
-    // 几何收缩 2.5% 消除边界毛边与影迹
-    const insetX = Math.round(best.width * 0.025);
-    const insetY = Math.round(best.height * 0.025);
-    const newX = best.x + insetX;
-    const newY = best.y + insetY;
-    const newWidth = best.width - insetX * 2;
-    const newHeight = best.height - insetY * 2;
-
-    const expanded = expandToIdCardRect(newX, newY, newWidth, newHeight, imgWidth, imgHeight);
+    // 先扩展到身份证标准比例
+    const expanded = expandToIdCardRect(best.x, best.y, best.width, best.height, imgWidth, imgHeight);
+    
+    // 对符合比例的最终包围盒进行等比强力向内收缩 3.5%，避免背景与投影毛边
+    const insetX = Math.round(expanded.width * 0.035);
+    const insetY = Math.round(expanded.height * 0.035);
+    const newX = expanded.x + insetX;
+    const newY = expanded.y + insetY;
+    const newWidth = expanded.width - insetX * 2;
+    const newHeight = expanded.height - insetY * 2;
     if (expanded.width <= 0 || expanded.height <= 0) {
       return null;
     }
@@ -377,12 +378,12 @@ function detectIdCardRect(img) {
           sortedPts[2] = pts[br_idx];
           sortedPts[3] = pts[bl_idx];
         }
-        // 几何收缩角点 4.0% 向中心收缩，消除边界残留的背景与投影毛边
+        // 几何收缩角点 5.5% 向中心收缩，彻底消除边界外部任何残存的背景与投影毛边
         let cx = (sortedPts[0].x + sortedPts[1].x + sortedPts[2].x + sortedPts[3].x) / 4;
         let cy = (sortedPts[0].y + sortedPts[1].y + sortedPts[2].y + sortedPts[3].y) / 4;
         for (let k = 0; k < 4; k++) {
-          sortedPts[k].x = cx + (sortedPts[k].x - cx) * 0.96;
-          sortedPts[k].y = cy + (sortedPts[k].y - cy) * 0.96;
+          sortedPts[k].x = cx + (sortedPts[k].x - cx) * 0.945;
+          sortedPts[k].y = cy + (sortedPts[k].y - cy) * 0.945;
         }
 
         // 进行透视变换，拉平为 856x540 的标准比例
@@ -1022,6 +1023,11 @@ export default function IdCardScanner() {
 
         ctx.drawImage(img, finalLeft, finalTop, finalW, finalH);
 
+        // 绘制一圈 12 像素纯白边框以消除毛刺 (stroke 线宽为 24 像素，一半向内对齐覆盖)
+        ctx.strokeStyle = '#FFFFFF';
+        ctx.lineWidth = 24;
+        ctx.strokeRect(0, 0, 856, 540);
+
         canvas.toBlob((blob) => {
           const croppedUrl = URL.createObjectURL(blob);
           if (side === 'front') {
@@ -1062,6 +1068,11 @@ export default function IdCardScanner() {
       const finalH = drawH * cropZoom * k;
       
       ctx.drawImage(img, finalLeft, finalTop, finalW, finalH);
+      
+      // 绘制一圈 12 像素纯白边框以消除毛刺 (stroke 线宽为 24 像素，一半向内对齐覆盖)
+      ctx.strokeStyle = '#FFFFFF';
+      ctx.lineWidth = 24;
+      ctx.strokeRect(0, 0, 856, 540);
       
       canvas.toBlob((blob) => {
         const croppedUrl = URL.createObjectURL(blob);

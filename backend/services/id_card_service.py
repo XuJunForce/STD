@@ -219,15 +219,17 @@ def crop_by_grabcut(image: np.ndarray) -> np.ndarray | None:
 
     _, x, y, w, h = sorted(candidates, reverse=True, key=lambda item: item[0])[0]
     
-    # 向内收缩 2.5% 以去除 GrabCut 边界可能带有的背景毛边与虚影
-    inset_px_w = int(w * 0.025)
-    inset_px_h = int(h * 0.025)
+    # 先扩展比例，以对齐标准身份证长宽比
+    x, y, w, h = expand_to_id_card_rect(x, y, w, h, img_w, img_h)
+    
+    # 对已经对齐比例的包围盒，向内等比强力收缩 3.5% 以彻底消除边缘毛影
+    inset_px_w = int(w * 0.035)
+    inset_px_h = int(h * 0.035)
     x += inset_px_w
     y += inset_px_h
     w -= inset_px_w * 2
     h -= inset_px_h * 2
 
-    x, y, w, h = expand_to_id_card_rect(x, y, w, h, img_w, img_h)
     if w <= 0 or h <= 0:
         return None
 
@@ -332,8 +334,8 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
     card_pts = candidates[0][1]
 
-    # 几何收缩角点 4.0% 向中心收缩，消除边界残留的背景与投影毛边
-    shrunk_pts = shrink_quad(card_pts, factor=0.96)
+    # 几何收缩角点 5.5% 向中心收缩，彻底消除边界外部任何残存的背景与投影毛边
+    shrunk_pts = shrink_quad(card_pts, factor=0.945)
 
     # 7. 透视矫正并裁剪
     cropped = four_point_transform(original, shrunk_pts)

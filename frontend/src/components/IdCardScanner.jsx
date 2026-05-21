@@ -8,8 +8,10 @@ export default function IdCardScanner() {
   // 状态管理
   const [frontFile, setFrontFile] = useState(null);
   const [frontPreview, setFrontPreview] = useState('');
+  const [frontOriginal, setFrontOriginal] = useState(null); // 原始大图以支持重新裁切
   const [backFile, setBackFile] = useState(null);
   const [backPreview, setBackPreview] = useState('');
+  const [backOriginal, setBackOriginal] = useState(null); // 原始大图以支持重新裁切
 
   const [watermarkText, setWatermarkText] = useState('仅用于业务办理，他用无效');
   const [watermarkOpacity, setWatermarkOpacity] = useState(0.15);
@@ -22,6 +24,13 @@ export default function IdCardScanner() {
   const [backRotate, setBackRotate] = useState(0); // 0, 90, 180, 270
   const [printScale, setPrintScale] = useState('1to1'); // 1to1 | fit
   const [fileName, setFileName] = useState('身份证复印件.pdf');
+
+  // 证件裁切相关状态
+  const [cropModal, setCropModal] = useState({ isOpen: false, side: null, imgSrc: null });
+  const [cropZoom, setCropZoom] = useState(1.0);
+  const [cropOffset, setCropOffset] = useState({ x: 0, y: 0 });
+  const [isCropDragging, setIsCropDragging] = useState(false);
+  const [cropStartPos, setCropStartPos] = useState({ x: 0, y: 0 });
 
   // 生成状态
   const [generating, setGenerating] = useState(false);
@@ -41,6 +50,102 @@ export default function IdCardScanner() {
     };
   }, [frontPreview, backPreview]);
 
+  // 裁切模态框逻辑
+  const openCropModal = (side, file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      setCropZoom(1.0);
+      setCropOffset({ x: 0, y: 0 });
+      setCropModal({
+        isOpen: true,
+        side,
+        imgSrc: reader.result
+      });
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleCropMouseDown = (e) => {
+    setIsCropDragging(true);
+    setCropStartPos({ x: e.clientX - cropOffset.x, y: e.clientY - cropOffset.y });
+  };
+
+  const handleCropMouseMove = (e) => {
+    if (!isCropDragging) return;
+    setCropOffset({
+      x: e.clientX - cropStartPos.x,
+      y: e.clientY - cropStartPos.y
+    });
+  };
+
+  const handleCropMouseUp = () => {
+    setIsCropDragging(false);
+  };
+
+  const handleCropTouchStart = (e) => {
+    if (e.touches.length === 1) {
+      setIsCropDragging(true);
+      const touch = e.touches[0];
+      setCropStartPos({ x: touch.clientX - cropOffset.x, y: touch.clientY - cropOffset.y });
+    }
+  };
+
+  const handleCropTouchMove = (e) => {
+    if (!isCropDragging || e.touches.length !== 1) return;
+    const touch = e.touches[0];
+    setCropOffset({
+      x: touch.clientX - cropStartPos.x,
+      y: touch.clientY - cropStartPos.y
+    });
+  };
+
+  const handleSaveCrop = () => {
+    const img = new Image();
+    img.src = cropModal.imgSrc;
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 856;
+      canvas.height = 540;
+      const ctx = canvas.getContext('2d');
+      
+      const frameW = 380;
+      const frameH = 240;
+      
+      const scaleToFit = Math.max(frameW / img.width, frameH / img.height);
+      const drawW = img.width * scaleToFit;
+      const drawH = img.height * scaleToFit;
+      
+      const k = 856 / frameW;
+      
+      const finalLeft = (frameW / 2 + cropOffset.x - (drawW * cropZoom) / 2) * k;
+      const finalTop = (frameH / 2 + cropOffset.y - (drawH * cropZoom) / 2) * k;
+      const finalW = drawW * cropZoom * k;
+      const finalH = drawH * cropZoom * k;
+      
+      ctx.drawImage(img, finalLeft, finalTop, finalW, finalH);
+      
+      canvas.toBlob((blob) => {
+        const croppedUrl = URL.createObjectURL(blob);
+        if (cropModal.side === 'front') {
+          setFrontFile(new File([blob], "front_cropped.jpg", { type: "image/jpeg" }));
+          setFrontPreview(croppedUrl);
+        } else {
+          setBackFile(new File([blob], "back_cropped.jpg", { type: "image/jpeg" }));
+          setBackPreview(croppedUrl);
+        }
+        setGeneratedPdf(null);
+        setCropModal({ isOpen: false, side: null, imgSrc: null });
+      }, 'image/jpeg', 0.95);
+    };
+  };
+
+  const handleRecrop = (side) => {
+    const originalFile = side === 'front' ? frontOriginal : backOriginal;
+    if (originalFile) {
+      openCropModal(side, originalFile);
+    }
+  };
+
   // 处理上传图片
   const handleFileChange = (e, side) => {
     const file = e.target.files[0];
@@ -49,15 +154,13 @@ export default function IdCardScanner() {
       alert('请上传有效的图片文件！');
       return;
     }
-    const url = URL.createObjectURL(file);
     if (side === 'front') {
-      setFrontFile(file);
-      setFrontPreview(url);
+      setFrontOriginal(file);
     } else {
-      setBackFile(file);
-      setBackPreview(url);
+      setBackOriginal(file);
     }
-    setGeneratedPdf(null); // 有变动时清空已生成的PDF
+    openCropModal(side, file);
+    e.target.value = ''; // 清空以保证同一个文件能够重复上传触发
   };
 
   // 拖拽处理
@@ -73,15 +176,12 @@ export default function IdCardScanner() {
       alert('请上传有效的图片文件！');
       return;
     }
-    const url = URL.createObjectURL(file);
     if (side === 'front') {
-      setFrontFile(file);
-      setFrontPreview(url);
+      setFrontOriginal(file);
     } else {
-      setBackFile(file);
-      setBackPreview(url);
+      setBackOriginal(file);
     }
-    setGeneratedPdf(null);
+    openCropModal(side, file);
   };
 
   // 剪贴板粘贴
@@ -90,15 +190,12 @@ export default function IdCardScanner() {
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.indexOf('image') !== -1) {
         const file = items[i].getAsFile();
-        const url = URL.createObjectURL(file);
         if (side === 'front') {
-          setFrontFile(file);
-          setFrontPreview(url);
+          setFrontOriginal(file);
         } else {
-          setBackFile(file);
-          setBackPreview(url);
+          setBackOriginal(file);
         }
-        setGeneratedPdf(null);
+        openCropModal(side, file);
         break;
       }
     }
@@ -110,11 +207,13 @@ export default function IdCardScanner() {
       if (frontPreview) URL.revokeObjectURL(frontPreview);
       setFrontFile(null);
       setFrontPreview('');
+      setFrontOriginal(null);
       setFrontRotate(0);
     } else {
       if (backPreview) URL.revokeObjectURL(backPreview);
       setBackFile(null);
       setBackPreview('');
+      setBackOriginal(null);
       setBackRotate(0);
     }
     setGeneratedPdf(null);
@@ -259,13 +358,13 @@ export default function IdCardScanner() {
     // 根据布局计算绘制坐标
     if (layout === 'vertical') {
       const x = (600 - cardW) / 2;
-      let yFront = 480;
-      let yBack = 220;
+      let yFront = 220;
+      let yBack = 480;
       if (printScale === 'fit') {
-        yFront = 450;
-        yBack = 120;
+        yFront = 120;
+        yBack = 450;
       }
-      // 绘制反面（上方）和正面（下方），这符合中国习惯
+      // 绘制正面（上方）和反面（下方），这符合复印习惯
       drawCard(frontPreview, x, yFront, frontRotate, 'front');
       drawCard(backPreview, x, yBack, backRotate, 'back');
     } else {
@@ -430,6 +529,7 @@ export default function IdCardScanner() {
                   <div className="preview-wrap">
                     <img src={frontPreview} alt="正面预览" className="card-img" />
                     <div className="img-overlay">
+                      <button className="crop-btn" onClick={() => handleRecrop('front')} title="裁切证件范围">✂️ 裁切</button>
                       <button className="rotate-btn" onClick={() => setFrontRotate((prev) => (prev + 90) % 360)} title="旋转90°">🔄 旋转 90°</button>
                       <button className="delete-btn" onClick={() => clearImage('front')} title="删除">🗑️</button>
                     </div>
@@ -439,13 +539,6 @@ export default function IdCardScanner() {
                     <span className="upload-icon">👤</span>
                     <span className="upload-text">点击上传正面 (头像面)</span>
                     <span className="upload-subtext">支持拖拽或直接剪贴板粘贴图片</span>
-                    <input 
-                      type="file" 
-                      ref={frontInputRef} 
-                      onChange={(e) => handleFileChange(e, 'front')}
-                      accept="image/*"
-                      style={{ display: 'none' }}
-                    />
                   </div>
                 )}
               </div>
@@ -461,6 +554,7 @@ export default function IdCardScanner() {
                   <div className="preview-wrap">
                     <img src={backPreview} alt="反面预览" className="card-img" />
                     <div className="img-overlay">
+                      <button className="crop-btn" onClick={() => handleRecrop('back')} title="裁切证件范围">✂️ 裁切</button>
                       <button className="rotate-btn" onClick={() => setBackRotate((prev) => (prev + 90) % 360)} title="旋转90°">🔄 旋转 90°</button>
                       <button className="delete-btn" onClick={() => clearImage('back')} title="删除">🗑️</button>
                     </div>
@@ -470,13 +564,6 @@ export default function IdCardScanner() {
                     <span className="upload-icon">🏛️</span>
                     <span className="upload-text">点击上传反面 (国徽面)</span>
                     <span className="upload-subtext">支持拖拽或直接剪贴板粘贴图片</span>
-                    <input 
-                      type="file" 
-                      ref={backInputRef} 
-                      onChange={(e) => handleFileChange(e, 'back')}
-                      accept="image/*"
-                      style={{ display: 'none' }}
-                    />
                   </div>
                 )}
               </div>
@@ -730,6 +817,92 @@ export default function IdCardScanner() {
 
         </div>
       </div>
+
+      {/* 隐藏的永久文件输入域，确保不被 unmount 引起 React 节点重用与覆盖 bug */}
+      <input 
+        type="file" 
+        ref={frontInputRef} 
+        onChange={(e) => handleFileChange(e, 'front')}
+        accept="image/*"
+        style={{ display: 'none' }}
+      />
+      <input 
+        type="file" 
+        ref={backInputRef} 
+        onChange={(e) => handleFileChange(e, 'back')}
+        accept="image/*"
+        style={{ display: 'none' }}
+      />
+
+      {/* 极其精美强大的连续互通裁剪框模态浮层 */}
+      {cropModal.isOpen && (
+        <div className="crop-modal-overlay glass-panel fade-in">
+          <div className="crop-modal-container glass-card">
+            <div className="crop-modal-header">
+              <h3>✂️ 裁切证件范围 ({cropModal.side === 'front' ? '正面/头像面' : '反面/国徽面'})</h3>
+              <button className="close-btn" onClick={() => setCropModal({ isOpen: false, side: null, imgSrc: null })}>×</button>
+            </div>
+            
+            <div className="crop-modal-body">
+              <p className="crop-tips">◀ 鼠标左键按住拖动图片进行平移，使用下方滑块缩放 🔍 ▶</p>
+              
+              <div 
+                className="crop-frame-container"
+                onMouseDown={handleCropMouseDown}
+                onMouseMove={handleCropMouseMove}
+                onMouseUp={handleCropMouseUp}
+                onMouseLeave={handleCropMouseUp}
+                onTouchStart={handleCropTouchStart}
+                onTouchMove={handleCropTouchMove}
+                onTouchEnd={handleCropMouseUp}
+              >
+                {/* 裁剪框视觉参考线 */}
+                <div className="crop-target-frame">
+                  <div className="crop-reference-card">
+                    {cropModal.side === 'front' ? (
+                      <div className="ref-avatar-box"></div>
+                    ) : (
+                      <div className="ref-emblem-box"></div>
+                    )}
+                  </div>
+                </div>
+                
+                {/* 原始图片，通过CSS做平移与缩放 */}
+                <img 
+                  src={cropModal.imgSrc} 
+                  alt="裁剪图片" 
+                  className="crop-image-element"
+                  style={{
+                    transform: `translate(${cropOffset.x}px, ${cropOffset.y}px) scale(${cropZoom})`,
+                    transformOrigin: 'center center'
+                  }}
+                  draggable="false"
+                />
+              </div>
+              
+              {/* 缩放控制器 */}
+              <div className="crop-control-row">
+                <span className="control-icon">🔍</span>
+                <input 
+                  type="range" 
+                  min="1.0" 
+                  max="3.0" 
+                  step="0.02"
+                  value={cropZoom}
+                  onChange={(e) => setCropZoom(parseFloat(e.target.value))}
+                  className="crop-zoom-slider"
+                />
+                <span className="zoom-text">{(cropZoom * 100).toFixed(0)}%</span>
+              </div>
+            </div>
+            
+            <div className="crop-modal-footer">
+              <button className="crop-btn-cancel" onClick={() => setCropModal({ isOpen: false, side: null, imgSrc: null })}>取消</button>
+              <button className="crop-btn-confirm" onClick={handleSaveCrop}>确认裁切</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

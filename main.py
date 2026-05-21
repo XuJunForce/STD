@@ -19,11 +19,21 @@ except ImportError:
     print("请先执行：\033[93mpip install --upgrade tencentcloud-sdk-python\033[0m")
     sys.exit(1)
 
+# 检测本地 OpenCV 与 Numpy 环境以支持三维透视校正与抠图本地兜底
+HAS_OPENCV = False
+try:
+    import cv2
+    import numpy as np
+    HAS_OPENCV = True
+except ImportError:
+    pass
+
 # 加载 .env 环境变量
 load_dotenv()
 
 SecretId = os.getenv("TENCENTCLOUD_SECRET_ID", "").strip()
 SecretKey = os.getenv("TENCENTCLOUD_SECRET_KEY", "").strip()
+
 
 # 颜色控制台打印工具
 def print_success(msg):
@@ -112,21 +122,157 @@ def crop_id_card_side(img_b64, side="FRONT"):
         
     return cropped_b64
 
+def order_points(pts):
+    """
+    将四个点排序为：
+    左上、右上、右下、左下
+    """
+    rect = np.zeros((4, 2), dtype="float32")
+
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]   # 左上
+    rect[2] = pts[np.argmax(s)]   # 右下
+
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]  # 右上
+    rect[3] = pts[np.argmax(diff)]  # 左下
+
+    return rect
+
+def four_point_transform(image, pts):
+    rect = order_points(pts)
+
+    tl, tr, br, bl = rect
+
+    width_a = np.linalg.norm(br - bl)
+    width_b = np.linalg.norm(tr - tl)
+    max_width = int(max(width_a, width_b))
+
+    height_a = np.linalg.norm(tr - br)
+    height_b = np.linalg.norm(tl - bl)
+    max_height = int(max(height_a, height_b))
+
+    dst = np.array([
+        [0, 0],
+        [max_width - 1, 0],
+        [max_width - 1, max_height - 1],
+        [0, max_height - 1]
+    ], dtype="float32")
+
+    matrix = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(image, matrix, (max_width, max_height))
+
+    return warped
+
+def local_opencv_crop_and_resize(src_path, dest_path):
+    """使用本地 OpenCV 对身份证进行边缘智能检测并做 3D 透视扶正裁剪，保存为标准的 300 DPI 1063x710 图片"""
+    if not HAS_OPENCV:
+        raise RuntimeError("未检测到本地 opencv-python / numpy 运行库。")
+        
+    image = cv2.imread(src_path)
+    if image is None:
+        raise ValueError("图片读取失败")
+
+    original = image.copy()
+    img_area = image.shape[0] * image.shape[1]
+
+    # 1. 灰度化
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 2. 自适应直方图均衡化，增强对比度
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    # 3. 去噪
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # 4. 多种边缘检测方法并合并，增强检测力
+    edges1 = cv2.Canny(blur, 30, 100)
+    edges2 = cv2.Canny(blur, 50, 150)
+    edges3 = cv2.Canny(blur, 75, 200)
+    edges = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
+
+    # 5. 形态学边缘线缝合与膨胀
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    edges = cv2.dilate(edges, kernel, iterations=1)
+
+    # 6. 提取最大轮廓
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+
+        # 降低面积阈值，适配不同焦距与背景占比下的身份证照片
+        if area < img_area * 0.03:
+            continue
+
+        # 多精度折线拟合，防止反光造成轮廓多边化
+        peri = cv2.arcLength(cnt, True)
+        for epsilon_factor in [0.02, 0.03, 0.04, 0.05]:
+            approx = cv2.approxPolyDP(cnt, epsilon_factor * peri, True)
+            
+            # 接受四边形至六边形做顶点逼近
+            if 4 <= len(approx) <= 6:
+                if len(approx) > 4:
+                    # 5或6边形取其最小外接矩形框的四个顶点
+                    rect = cv2.minAreaRect(cnt)
+                    box = cv2.boxPoints(rect)
+                    pts = np.intp(box)
+                else:
+                    pts = approx.reshape(-1, 2)
+
+                x, y, w, h = cv2.boundingRect(pts)
+                if w == 0 or h == 0:
+                    continue
+                    
+                ratio = max(w, h) / min(w, h)
+
+                # 宽容比例范围限制
+                if 1.3 <= ratio <= 2.0:
+                    # 分值模型：面积大且宽高比越贴近身份证国标黄金比例 1.586 分数越高
+                    score = area * (1.0 - abs(ratio - 1.586) / 1.586)
+                    candidates.append((score, pts))
+                    break
+
+    if not candidates:
+        raise ValueError("未检测到高置信度的身份证边缘轮廓。")
+
+    # 取分值最高的第一候选框
+    candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+    card_pts = candidates[0][1]
+
+    # 7. 射影几何 3D 逆变换拉平与裁剪
+    cropped = four_point_transform(original, card_pts)
+
+    # 8. 智能横放（若裁剪出的是竖向长图则顺时针转90度扶正）
+    h, w = cropped.shape[:2]
+    if h > w:
+        cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
+
+    # 9. 强行缩放到 1:1 标准高精尺寸 1063 x 710，采用 Lanczos4 获最高品质
+    cropped_resized = cv2.resize(cropped, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
+    cv2.imwrite(dest_path, cropped_resized)
+    
+    # 用 Pillow 开启重写 300 DPI 元数据物理融合
+    with Image.open(dest_path) as img_pil:
+        img_pil.save(dest_path, dpi=(300, 300))
+
 def local_crop_and_resize(src_path, dest_path):
-    """本地居中等比裁剪并缩放到 1063 x 710，保存为 300 DPI"""
+    """本地居中等比裁剪并缩放到 1063 x 710，保存为 300 DPI (Pillow 终极保底防线)"""
     with Image.open(src_path) as img:
         img_w, img_h = img.size
         target_ratio = 1063 / 710
         current_ratio = img_w / img_h
         
         if current_ratio > target_ratio:
-            # 原始图片过宽，需要裁掉左右边缘
             new_w = int(img_h * target_ratio)
             left = (img_w - new_w) // 2
             right = left + new_w
             img_cropped = img.crop((left, 0, right, img_h))
         else:
-            # 原始图片过高，需要裁掉上下边缘
             new_h = int(img_w / target_ratio)
             top = (img_h - new_h) // 2
             bottom = top + new_h
@@ -149,8 +295,15 @@ def get_print_img(imgPath1, imgPath2):
         set_image_dpi_resize("tmp/Front_raw.jpg", "tmp/Front.jpg")
         print_success("正面云端智能裁剪并扶正成功")
     except Exception as e:
-        print_warning(f"正面云端识别裁剪失败 ({e})，正在启用本地居中等比裁剪兜底...")
-        local_crop_and_resize(imgPath1, "tmp/Front.jpg")
+        print_warning(f"正面云端识别裁剪失败 ({e})")
+        # 智能切换本地 OpenCV (第二防线)
+        try:
+            print_info("正在启动本地 OpenCV 引擎进行智能边缘捕捉与透视校正...")
+            local_opencv_crop_and_resize(imgPath1, "tmp/Front.jpg")
+            print_success("正面本地 OpenCV 智能抠图与透视拉平成功！")
+        except Exception as ocv_err:
+            print_warning(f"正面本地 OpenCV 抠图失败 ({ocv_err})，正在启动 Pillow 进行居中等比裁剪保底 (第三防线)...")
+            local_crop_and_resize(imgPath1, "tmp/Front.jpg")
         
     time.sleep(0.5)  # 避免过快请求触发腾讯云 QPS 限制
 
@@ -162,10 +315,18 @@ def get_print_img(imgPath1, imgPath2):
         set_image_dpi_resize("tmp/Back_raw.jpg", "tmp/Back.jpg")
         print_success("反面云端智能裁剪并扶正成功")
     except Exception as e:
-        print_warning(f"反面云端识别裁剪失败 ({e})，正在启用本地居中等比裁剪兜底...")
-        local_crop_and_resize(imgPath2, "tmp/Back.jpg")
+        print_warning(f"反面云端识别裁剪失败 ({e})")
+        # 智能切换本地 OpenCV (第二防线)
+        try:
+            print_info("正在启动本地 OpenCV 引擎进行智能边缘捕捉与透视校正...")
+            local_opencv_crop_and_resize(imgPath2, "tmp/Back.jpg")
+            print_success("反面本地 OpenCV 智能抠图与透视拉平成功！")
+        except Exception as ocv_err:
+            print_warning(f"反面本地 OpenCV 抠图失败 ({ocv_err})，正在启动 Pillow 进行居中等比裁剪保底 (第三防线)...")
+            local_crop_and_resize(imgPath2, "tmp/Back.jpg")
         
     time.sleep(0.5)
+
 
     # 3. 拼合到 A4 白板 (300 DPI)
     # A4 页面在 300 DPI 下的标准分辨率为 2481 x 3510 像素

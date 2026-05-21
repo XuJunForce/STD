@@ -10,12 +10,8 @@ from PIL import Image, ImageEnhance, ImageDraw, ImageFont
 from reportlab.pdfgen import canvas
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.utils import ImageReader
-
-from tencentcloud.common import credential
-from tencentcloud.common.profile.client_profile import ClientProfile
-from tencentcloud.common.profile.http_profile import HttpProfile
-from tencentcloud.common.exception.tencent_cloud_sdk_exception import TencentCloudSDKException
-from tencentcloud.ocr.v20181119 import ocr_client, models
+import cv2
+import numpy as np
 
 from backend.services.db_service import SessionLocal
 from backend.services.log_service import log_invocation
@@ -78,55 +74,152 @@ def get_system_font(size: int = 20) -> ImageFont.ImageFont:
     # 终极保底
     return ImageFont.load_default()
 
-def crop_image_via_tencent_ocr(img_bytes: bytes, side: str) -> bytes:
-    """调用腾讯云 OCR API 裁剪身份证并做自动角校正，返回裁剪后的图片 bytes。
-    如果密钥未配置、接口报错或任何异常，则抛出异常，由上层捕获并平滑降级。
+def order_points(pts):
     """
-    secret_id = os.getenv("TENCENTCLOUD_SECRET_ID", "").strip()
-    secret_key = os.getenv("TENCENTCLOUD_SECRET_KEY", "").strip()
-    
-    if not secret_id or not secret_key:
-        raise ValueError("Tencent Cloud SecretId/SecretKey not configured in .env file.")
+    将四个点排序为：
+    左上、右上、右下、左下
+    """
+    rect = np.zeros((4, 2), dtype="float32")
+
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]   # 左上
+    rect[2] = pts[np.argmax(s)]   # 右下
+
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]  # 右上
+    rect[3] = pts[np.argmax(diff)]  # 左下
+
+    return rect
+
+
+def four_point_transform(image, pts):
+    rect = order_points(pts)
+
+    tl, tr, br, bl = rect
+
+    width_a = np.linalg.norm(br - bl)
+    width_b = np.linalg.norm(tr - tl)
+    max_width = int(max(width_a, width_b))
+
+    height_a = np.linalg.norm(tr - br)
+    height_b = np.linalg.norm(tl - bl)
+    max_height = int(max(height_a, height_b))
+
+    dst = np.array([
+        [0, 0],
+        [max_width - 1, 0],
+        [max_width - 1, max_height - 1],
+        [0, max_height - 1]
+    ], dtype="float32")
+
+    matrix = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(image, matrix, (max_width, max_height))
+
+    return warped
+
+
+def crop_id_card_bytes(img_bytes: bytes) -> bytes:
+    """使用本地 OpenCV 进行身份证边框检测与 3D 透视扶正裁剪，返回裁剪后的图片 bytes。
+    如果未检测到身份证边框，抛出 ValueError，由上层捕获降级。
+    """
+    nparr = np.frombuffer(img_bytes, np.uint8)
+    image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    if image is None:
+        raise ValueError("图片解码失败")
+
+    original = image.copy()
+    img_area = image.shape[0] * image.shape[1]
+
+    # 1. 灰度化
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+    # 2. 自适应直方图均衡化，增强对比度
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    gray = clahe.apply(gray)
+
+    # 3. 去噪
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+
+    # 4. 多种边缘检测方法并合并，增强检测力
+    edges1 = cv2.Canny(blur, 30, 100)
+    edges2 = cv2.Canny(blur, 50, 150)
+    edges3 = cv2.Canny(blur, 75, 200)
+    edges = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
+
+    # 5. 形态学操作
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+    edges = cv2.dilate(edges, kernel, iterations=1)
+
+    # 6. 找轮廓
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    candidates = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+
+        # 降低面积阈值，从5%降到3%
+        if area < img_area * 0.03:
+            continue
+
+        # 多边形拟合，尝试不同的精度
+        peri = cv2.arcLength(cnt, True)
         
-    # 将输入 bytes 转换为 base64
-    img_b64 = base64.b64encode(img_bytes).decode('utf-8')
-    
-    # 初始化腾讯云凭证与客户端
-    cred = credential.Credential(secret_id, secret_key)
-    httpProfile = HttpProfile()
-    httpProfile.endpoint = "ocr.tencentcloudapi.com"
-    
-    clientProfile = ClientProfile()
-    clientProfile.httpProfile = httpProfile
-    client = ocr_client.OcrClient(cred, "ap-guangzhou", clientProfile)
-    
-    req = models.IDCardOCRRequest()
-    
-    # 构造请求参数
-    card_side = "FRONT" if side.upper() == "FRONT" else "BACK"
-    params = {
-        "ImageBase64": img_b64,
-        "CardSide": card_side,
-        "Config": json.dumps({"CropIdCard": True, "CropPortrait": False})
-    }
-    req.from_json_string(json.dumps(params))
-    
-    # 发送请求
-    resp = client.IDCardOCR(req)
-    resp_json = json.loads(resp.to_json_string())
-    
-    # 提取裁剪后的 Base64 数据
-    advanced_info_str = resp_json.get("AdvancedInfo")
-    if not advanced_info_str:
-        raise ValueError("AdvancedInfo not returned from Tencent Cloud OCR API.")
+        for epsilon_factor in [0.02, 0.03, 0.04, 0.05]:
+            approx = cv2.approxPolyDP(cnt, epsilon_factor * peri, True)
+            
+            # 接受4-6边形（有些情况下可能不是完美的四边形）
+            if 4 <= len(approx) <= 6:
+                # 如果是5或6边形，取外接矩形的四个角点
+                if len(approx) > 4:
+                    rect = cv2.minAreaRect(cnt)
+                    box = cv2.boxPoints(rect)
+                    pts = np.intp(box)
+                else:
+                    pts = approx.reshape(-1, 2)
+
+                x, y, w, h = cv2.boundingRect(pts)
+                
+                if w == 0 or h == 0:
+                    continue
+                    
+                ratio = max(w, h) / min(w, h)
+
+                # 放宽比例限制，从1.45-1.75扩大到1.3-2.0
+                if 1.3 <= ratio <= 2.0:
+                    # 计算轮廓占图像的比例
+                    area_ratio = area / img_area
+                    
+                    # 优先选择面积较大且比例接近1.586的
+                    score = area * (1.0 - abs(ratio - 1.586) / 1.586)
+                    candidates.append((score, pts))
+                    break
+
+    if not candidates:
+        raise ValueError("未检测到身份证边框")
+
+    # 按评分排序
+    candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
+    card_pts = candidates[0][1]
+
+    # 7. 透视矫正并裁剪
+    cropped = four_point_transform(original, card_pts)
+
+    # 如果裁剪后是竖着的，自动转正
+    h, w = cropped.shape[:2]
+    if h > w:
+        cropped = cv2.rotate(cropped, cv2.ROTATE_90_CLOCKWISE)
+
+    # 强行缩放到 1:1 标准高精尺寸 1063 x 710，采用 Lanczos4 获最高品质
+    cropped_resized = cv2.resize(cropped, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
+
+    # 编码回 bytes
+    success, encoded_img = cv2.imencode(".jpg", cropped_resized)
+    if not success:
+        raise ValueError("图片编码失败")
         
-    advanced_info = json.loads(advanced_info_str)
-    cropped_b64 = advanced_info.get("IdCard")
-    if not cropped_b64:
-        raise ValueError("IdCard cropped image base64 not found in AdvancedInfo.")
-        
-    # 解码返回 bytes
-    return base64.b64decode(cropped_b64)
+    return encoded_img.tobytes()
 
 def enhance_image(
     img_bytes: bytes,
@@ -239,17 +332,13 @@ def process_and_generate_pdf(
     front_rotate = int(params.get("front_rotate", 0))
     back_rotate = int(params.get("back_rotate", 0))
     print_scale = params.get("print_scale", "1to1")  # 1to1 (1:1 打印原大) | fit (自适应最大化铺满)
-    use_tencent_ocr = params.get("use_tencent_ocr", False)
-    if isinstance(use_tencent_ocr, str):
-        use_tencent_ocr = use_tencent_ocr.lower() in ("true", "1", "yes")
-
     status = "success"
     error_msg = None
     stack_trace = None
     pdf_bytes = b""
     
     # 1. 缓存匹配机制 (基于图片内容哈希 + 所有参数)
-    param_hash_str = f"{watermark_text}_{watermark_opacity}_{watermark_color}_{layout}_{color_mode}_{brightness}_{contrast}_{front_rotate}_{back_rotate}_{print_scale}_{use_tencent_ocr}"
+    param_hash_str = f"{watermark_text}_{watermark_opacity}_{watermark_color}_{layout}_{color_mode}_{brightness}_{contrast}_{front_rotate}_{back_rotate}_{print_scale}"
     front_md5 = hashlib.md5(front_bytes).hexdigest()
     back_md5 = hashlib.md5(back_bytes).hexdigest()
     
@@ -287,21 +376,20 @@ def process_and_generate_pdf(
             pass  # 如果缓存读取失败，降级重新生成
             
     try:
-        # 1.5. 如果启用了腾讯云 OCR 且配置了密钥，在画面微调前执行云端智能裁剪纠偏
-        if use_tencent_ocr:
-            try:
-                front_cropped = crop_image_via_tencent_ocr(front_bytes, "FRONT")
-                front_bytes = front_cropped
-                print("🔥 [Tencent OCR] Front image cropped and deskewed successfully.")
-            except Exception as e:
-                print(f"⚠️ [Tencent OCR] Front crop failed: {e}. Falling back to original/local crop.")
-            
-            try:
-                back_cropped = crop_image_via_tencent_ocr(back_bytes, "BACK")
-                back_bytes = back_cropped
-                print("🔥 [Tencent OCR] Back image cropped and deskewed successfully.")
-            except Exception as e:
-                print(f"⚠️ [Tencent OCR] Back crop failed: {e}. Falling back to original/local crop.")
+        # 1.5. 启动本地 OpenCV 身份证智能边缘捕捉与透视校正裁剪，自动扶正
+        try:
+            front_cropped = crop_id_card_bytes(front_bytes)
+            front_bytes = front_cropped
+            print("🔥 [OpenCV Local] Front image cropped and deskewed successfully.")
+        except Exception as e:
+            print(f"⚠️ [OpenCV Local] Front crop failed: {e}. Falling back to original/uploaded image.")
+        
+        try:
+            back_cropped = crop_id_card_bytes(back_bytes)
+            back_bytes = back_cropped
+            print("🔥 [OpenCV Local] Back image cropped and deskewed successfully.")
+        except Exception as e:
+            print(f"⚠️ [OpenCV Local] Back crop failed: {e}. Falling back to original/uploaded image.")
 
         # 2. 图像增强与色彩变换
         front_enhanced = enhance_image(front_bytes, front_rotate, brightness, contrast, color_mode)

@@ -15,6 +15,5 @@ dependencies = [
     "python-multipart>=0.0.29",
     "reportlab>=4.5.1",
     "sqlalchemy>=2.0.29",
-    "tencentcloud-sdk-python>=3.1.101",
     "uvicorn>=0.29.0",
 ]

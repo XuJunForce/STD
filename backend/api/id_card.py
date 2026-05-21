@@ -29,8 +29,7 @@ async def generate_id_card(
     back_rotate: int = Form(0, description="反面旋转角度 (0, 90, 180, 270)"),
     print_scale: str = Form("1to1", description="打印比例: 1to1(1:1原大) | fit(自适应最大化铺满)"),
     file_name: str = Form("身份证复印件.pdf", description="生成PDF的保存名称"),
-    session_id: str = Form("sess-api-default", description="遥测链 Session ID"),
-    use_tencent_ocr: bool = Form(False, description="是否启用腾讯云 AI 智能裁剪与纠偏")
+    session_id: str = Form("sess-api-default", description="遥测链 Session ID")
 ):
     """上传身份证正反面图片并生成排版好的 A4 PDF 副本"""
     # 验证上传文件类型
@@ -58,8 +57,7 @@ async def generate_id_card(
             "front_rotate": front_rotate,
             "back_rotate": back_rotate,
             "print_scale": print_scale,
-            "file_name": file_name,
-            "use_tencent_ocr": use_tencent_ocr
+            "file_name": file_name
         }
         
         # 调用核心服务生成 PDF

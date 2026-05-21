@@ -1,0 +1,123 @@
+.category-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 24px;
+  margin-bottom: 20px;
+  border-radius: 16px;
+  height: 64px;
+}
+
+.logo-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.logo-pulse {
+  width: 10px;
+  height: 10px;
+  background-color: var(--glow-cyan);
+  border-radius: 50%;
+  box-shadow: 0 0 10px var(--glow-cyan);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.6;
+    box-shadow: 0 0 4px var(--glow-cyan);
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 1;
+    box-shadow: 0 0 12px var(--glow-cyan);
+  }
+  100% {
+    transform: scale(0.9);
+    opacity: 0.6;
+    box-shadow: 0 0 4px var(--glow-cyan);
+  }
+}
+
+.logo-text {
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: #fff;
+}
+
+.text-glow {
+  color: var(--glow-cyan);
+  text-shadow: 0 0 8px rgba(0, 242, 254, 0.4);
+}
+
+.pill-container {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.category-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 20px;
+  border-radius: 9999px; /* Absolute oval shape */
+  background: var(--bg-pill);
+  border: 1px solid var(--border-color);
+  color: #94A3B8;
+  font-weight: 500;
+  font-size: 0.9rem;
+  position: relative;
+  overflow: hidden;
+  transition: var(--transition-smooth);
+}
+
+.category-pill:hover {
+  background: var(--bg-pill-hover);
+  border-color: var(--border-color-hover);
+  color: #fff;
+  transform: translateY(-1px);
+}
+
+.category-pill.active {
+  background: var(--glow-gradient);
+  border-color: transparent;
+  color: #030712;
+  font-weight: 600;
+  box-shadow: var(--shadow-glow);
+  transform: translateY(0);
+}
+
+.pill-icon {
+  font-size: 1rem;
+}
+
+.pill-glow-dot {
+  position: absolute;
+  bottom: 3px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 4px #fff;
+}
+
+@media (max-width: 768px) {
+  .category-bar {
+    flex-direction: column;
+    height: auto;
+    gap: 16px;
+    padding: 16px;
+  }
+  
+  .pill-container {
+    width: 100%;
+    overflow-x: auto;
+    padding-bottom: 6px;
+  }
+}

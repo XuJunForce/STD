@@ -46,6 +46,115 @@
   gap: 20px;
 }
 
+/* AI Engine Status Bar */
+.ai-engine-status-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  backdrop-filter: blur(10px);
+  transition: all 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ai-engine-status-bar:hover {
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.15);
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+}
+
+.status-indicator-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-block;
+}
+
+.status-indicator-dot.loading {
+  background: #FFCC00;
+  box-shadow: 0 0 8px #FFCC00;
+  animation: status-pulse-yellow 1.8s infinite ease-in-out;
+}
+
+.status-indicator-dot.loaded {
+  background: #30D158;
+  box-shadow: 0 0 10px #30D158;
+  animation: status-pulse-green 2s infinite ease-in-out;
+}
+
+.status-indicator-text {
+  font-size: 0.8rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sparkle-icon {
+  animation: sparkle-float 2.5s infinite ease-in-out;
+  display: inline-block;
+}
+
+.spinner-icon {
+  animation: spin-rotate 2s infinite linear;
+  display: inline-block;
+}
+
+@keyframes status-pulse-yellow {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(255, 204, 0, 0.7);
+  }
+  70% {
+    transform: scale(1.1);
+    box-shadow: 0 0 0 6px rgba(255, 204, 0, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(255, 204, 0, 0);
+  }
+}
+
+@keyframes status-pulse-green {
+  0% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(48, 209, 88, 0.7);
+  }
+  70% {
+    transform: scale(1.15);
+    box-shadow: 0 0 0 6px rgba(48, 209, 88, 0);
+  }
+  100% {
+    transform: scale(0.95);
+    box-shadow: 0 0 0 0 rgba(48, 209, 88, 0);
+  }
+}
+
+@keyframes sparkle-float {
+  0%, 100% {
+    transform: translateY(0) scale(1);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translateY(-2px) scale(1.1);
+    opacity: 1;
+    filter: drop-shadow(0 0 4px rgba(255, 215, 0, 0.6));
+  }
+}
+
+@keyframes spin-rotate {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .section-title {
   font-size: 1rem;
   font-weight: 600;

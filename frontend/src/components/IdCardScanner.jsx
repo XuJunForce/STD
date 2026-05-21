@@ -3,18 +3,211 @@ import { useApp } from '../context/AppContext';
 import './IdCardScanner.css';
 
 /**
- * 纯前端高性能身份证边缘与区域提取算法 (Sobel算子 + 投影密度分析)
+ * 纯前端高性能身份证智能透视校正与边缘提取算法 (OpenCV.js Wasm 纠偏 + 自研双向二值化漫水填充 + 多维度几何打分)
  * @param {HTMLImageElement} img 原始Image对象
- * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number }
- */
-/**
- * 纯前端高性能身份证边缘与区域提取算法 (自适应双向二值化 + 边缘闭合漫水填充 + 几何打分排名)
- * @param {HTMLImageElement} img 原始Image对象
- * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number }
+ * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number, warpedCanvas: HTMLCanvasElement, source: string }
  */
 function detectIdCardRect(img) {
+  // ==================== 第一防线：OpenCV.js Wasm 智能四角检测与 3D 透视纠偏 ====================
+  if (window.cv && window.cv.Mat && window.cv.getPerspectiveTransform) {
+    try {
+      const cv = window.cv;
+      
+      // 1. 读取原图为 Mat
+      let src = cv.imread(img);
+      let gray = new cv.Mat();
+      let blurred = new cv.Mat();
+      let edges = new cv.Mat();
+      let dilated = new cv.Mat();
+      
+      // 2. 预处理：灰度化与高斯去噪
+      cv.cvtColor(src, gray, cv.COLOR_RGBA2GRAY);
+      cv.GaussianBlur(gray, blurred, new cv.Size(5, 5), 0);
+      
+      // 3. Canny 算子高精提取边缘
+      cv.Canny(blurred, edges, 75, 200);
+      
+      // 4. 3x3 矩形结构元膨胀粗化，桥接细微断缝
+      let M = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(3, 3));
+      cv.dilate(edges, dilated, M);
+      M.delete();
+      
+      // 5. 提取外部边缘轮廓
+      let contours = new cv.MatVector();
+      let hierarchy = new cv.Mat();
+      cv.findContours(dilated, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+      
+      let bestContour = null;
+      let approxPoly = new cv.Mat();
+      let maxArea = -1;
+      const imgArea = src.cols * src.rows;
+      
+      // 遍历轮廓寻找最大面积且几何合理的多边形四角轮廓
+      for (let i = 0; i < contours.size(); ++i) {
+        let contour = contours.get(i);
+        let area = cv.contourArea(contour);
+        
+        // 排除满屏噪点和极其细碎噪点（阈值设为占画面面积的 6% 至 95%）
+        if (area < imgArea * 0.06 || area > imgArea * 0.95) {
+          contour.delete();
+          continue;
+        }
+        
+        // 多边形逼近 (RDP 算子逼近)
+        let peri = cv.arcLength(contour, true);
+        let approx = new cv.Mat();
+        cv.approxPolyDP(contour, approx, 0.022 * peri, true);
+        
+        // 逼近结果必须是凸四边形
+        if (approx.rows === 4 && cv.isContourConvex(approx)) {
+          // 比例校验（宽高比要在 [1.1, 2.1] 之间）
+          let rect = cv.boundingRect(approx);
+          const ratio = rect.width / rect.height;
+          const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio;
+          
+          if (ratioNorm >= 1.1 && ratioNorm <= 2.1) {
+            if (area > maxArea) {
+              maxArea = area;
+              if (approxPoly.rows > 0) approxPoly.delete();
+              approxPoly = approx.clone();
+              if (bestContour) bestContour.delete();
+              bestContour = contour.clone();
+            }
+          }
+        }
+        approx.delete();
+        contour.delete();
+      }
+      
+      // 如果找到了完美的身份证四角区域，执行高级透视拉平纠偏 (Warp Perspective)
+      if (approxPoly.rows === 4) {
+        let pts = [];
+        for (let i = 0; i < 4; i++) {
+          pts.push({
+            x: approxPoly.data32S[i * 2],
+            y: approxPoly.data32S[i * 2 + 1]
+          });
+        }
+        
+        // 6. 对四个顶点进行时针排序 (左上, 右上, 右下, 左下)
+        // 使用标准的 x+y(sum) 和 x-y(diff) 归纳法
+        let sortedPts = new Array(4);
+        let sums = pts.map(p => p.x + p.y);
+        let diffs = pts.map(p => p.x - p.y);
+        
+        let tl_idx = sums.indexOf(Math.min(...sums));
+        let br_idx = sums.indexOf(Math.max(...sums));
+        let tr_idx = diffs.indexOf(Math.max(...diffs));
+        let bl_idx = diffs.indexOf(Math.min(...diffs));
+        
+        // 健壮性排序防重叠过滤
+        if (tl_idx === br_idx || tr_idx === bl_idx) {
+          // 若偏振重叠，回退到按 X 轴与 Y 轴交集分割
+          pts.sort((a, b) => a.x - b.x);
+          let leftHalf = [pts[0], pts[1]].sort((a, b) => a.y - b.y);
+          let rightHalf = [pts[2], pts[3]].sort((a, b) => a.y - b.y);
+          sortedPts[0] = leftHalf[0];
+          sortedPts[1] = rightHalf[0];
+          sortedPts[2] = rightHalf[1];
+          sortedPts[3] = leftHalf[1];
+        } else {
+          sortedPts[0] = pts[tl_idx];
+          sortedPts[1] = pts[tr_idx];
+          sortedPts[2] = pts[br_idx];
+          sortedPts[3] = pts[bl_idx];
+        }
+        
+        // 7. 执行 Perspective Warp 透视矩阵变换
+        let warpedCanvas = document.createElement('canvas');
+        warpedCanvas.width = 856;
+        warpedCanvas.height = 540;
+        
+        let srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+          sortedPts[0].x, sortedPts[0].y,
+          sortedPts[1].x, sortedPts[1].y,
+          sortedPts[2].x, sortedPts[2].y,
+          sortedPts[3].x, sortedPts[3].y
+        ]);
+        let dstTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
+          0, 0,
+          856, 0,
+          856, 540,
+          0, 540
+        ]);
+        
+        let transMat = cv.getPerspectiveTransform(srcTri, dstTri);
+        let warpedMat = new cv.Mat();
+        let dsize = new cv.Size(856, 540);
+        
+        cv.warpPerspective(src, warpedMat, transMat, dsize, cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
+        
+        // 投影到输出画布
+        cv.imshow(warpedCanvas, warpedMat);
+        
+        // 内存精准回收，绝对预防 WebAssembly OOM 内存泄露
+        src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
+        contours.delete(); hierarchy.delete(); approxPoly.delete();
+        if (bestContour) bestContour.delete();
+        srcTri.delete(); dstTri.delete(); transMat.delete(); warpedMat.delete();
+        
+        console.log("🔥 [AI Engine] OpenCV Wasm 透视拉平转换成功！");
+        return {
+          success: true,
+          warpedCanvas,
+          source: 'opencv-perspective'
+        };
+      }
+      
+      // ==================== 第二防线：OpenCV.js 直立外接包围矩形定位 (逼近失败时二级降级) ====================
+      let maxContourArea = -1;
+      let rectMat = null;
+      for (let i = 0; i < contours.size(); ++i) {
+        let contour = contours.get(i);
+        let area = cv.contourArea(contour);
+        if (area > imgArea * 0.08 && area < imgArea * 0.95) {
+          let rect = cv.boundingRect(contour);
+          const ratio = rect.width / rect.height;
+          const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio;
+          
+          if (ratioNorm >= 1.15 && ratioNorm <= 2.0) {
+            if (area > maxContourArea) {
+              maxContourArea = area;
+              rectMat = rect;
+            }
+          }
+        }
+        contour.delete();
+      }
+      
+      if (rectMat) {
+        const x = rectMat.x;
+        const y = rectMat.y;
+        const width = rectMat.width;
+        const height = rectMat.height;
+        
+        src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
+        contours.delete(); hierarchy.delete(); approxPoly.delete();
+        if (bestContour) bestContour.delete();
+        
+        console.log("💡 [AI Engine] OpenCV 轮廓外接矩形提取成功！");
+        return {
+          success: true,
+          x, y, width, height,
+          source: 'opencv-bbox'
+        };
+      }
+      
+      // 释放多余 Mat 内存
+      src.delete(); gray.delete(); blurred.delete(); edges.delete(); dilated.delete();
+      contours.delete(); hierarchy.delete(); approxPoly.delete();
+      if (bestContour) bestContour.delete();
+    } catch (e) {
+      console.warn("⚠️ OpenCV.js processing error, auto fallback to custom JS algorithm: ", e);
+    }
+  }
+
+  // ==================== 第三防线：自研双向自适应 Otsu + 形态学边缘漫水算法 (纯前端极速兜底) ====================
   try {
-    // 1. 下采样处理，控制在 160px 左右，极大提升纯 JS 像素遍历的速度并实现高频滤波去噪
     const canvas = document.createElement('canvas');
     const maxDim = 160;
     let w = img.width;
@@ -36,13 +229,11 @@ function detectIdCardRect(img) {
     const imgData = ctx.getImageData(0, 0, w, h);
     const data = imgData.data;
 
-    // 2. 灰度化处理
     const gray = new Uint8ClampedArray(w * h);
     for (let i = 0; i < data.length; i += 4) {
       gray[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
     }
 
-    // 3. 辅助函数：计算 Otsu 自适应灰度二值化阈值
     const getOtsuThreshold = (grayArr) => {
       const hist = new Int32Array(256);
       for (let i = 0; i < grayArr.length; i++) {
@@ -79,7 +270,6 @@ function detectIdCardRect(img) {
 
     const otsuThresh = getOtsuThreshold(gray);
 
-    // 4. 辅助函数：广度优先搜索 (BFS) 寻找连通域，避免 JS 递归导致的大图爆栈
     const findConnectedComponents = (binaryData) => {
       const visited = new Uint8Array(w * h);
       const components = [];
@@ -105,13 +295,11 @@ function detectIdCardRect(img) {
               if (cy < minY) minY = cy;
               if (cy > maxY) maxY = cy;
 
-              // 4邻域扩散
               const neighbors = [curIdx - 1, curIdx + 1, curIdx - w, curIdx + w];
               for (const nIdx of neighbors) {
                 if (nIdx >= 0 && nIdx < w * h) {
                   const nx = nIdx % w;
                   const ny = Math.floor(nIdx / w);
-                  // 避免跨行换边折返
                   if (Math.abs(nx - cx) <= 1) {
                     if (binaryData[nIdx] === 1 && !visited[nIdx]) {
                       visited[nIdx] = 1;
@@ -134,10 +322,8 @@ function detectIdCardRect(img) {
       return components;
     };
 
-    // 5. 构建候选矩形池
     const candidates = [];
 
-    // --- 通道一：Otsu 正向二值化连通域 (用于深色桌面上的浅色身份证) ---
     const binNormal = new Uint8Array(w * h);
     for (let i = 0; i < w * h; i++) {
       binNormal[i] = gray[i] >= otsuThresh ? 1 : 0;
@@ -145,7 +331,6 @@ function detectIdCardRect(img) {
     const compsNormal = findConnectedComponents(binNormal);
     candidates.push(...compsNormal.map(c => ({ ...c, source: 'otsu-normal' })));
 
-    // --- 通道二：Otsu 反向二值化连通域 (用于白桌子上的深色卡套/暗身份证) ---
     const binInverted = new Uint8Array(w * h);
     for (let i = 0; i < w * h; i++) {
       binInverted[i] = gray[i] < otsuThresh ? 1 : 0;
@@ -153,7 +338,6 @@ function detectIdCardRect(img) {
     const compsInverted = findConnectedComponents(binInverted);
     candidates.push(...compsInverted.map(c => ({ ...c, source: 'otsu-inverted' })));
 
-    // --- 通道三：Sobel 强边缘闭合 + 背景漫水填充 (用于极低对比度、白白对比或纯边缘封闭场景) ---
     const grad = new Float32Array(w * h);
     let maxGrad = 0;
     for (let y = 1; y < h - 1; y++) {
@@ -170,13 +354,12 @@ function detectIdCardRect(img) {
       }
     }
 
-    // 提取强边缘 (选择前 15% 强梯度的像素值作为阈值)
     const nonzeroGrads = [];
     for (let i = 0; i < w * h; i++) {
       if (grad[i] > 2) nonzeroGrads.push(grad[i]);
     }
     nonzeroGrads.sort((a, b) => a - b);
-    const threshIdx = Math.floor(nonzeroGrads.length * 0.85); // 分位数
+    const threshIdx = Math.floor(nonzeroGrads.length * 0.85);
     const gradThresh = nonzeroGrads.length > 0 ? nonzeroGrads[threshIdx] : 20;
 
     const edgeBin = new Uint8Array(w * h);
@@ -184,7 +367,6 @@ function detectIdCardRect(img) {
       edgeBin[i] = grad[i] >= gradThresh ? 1 : 0;
     }
 
-    // 3x3 边缘膨胀以连接微小的断点，形成封闭外框
     const edgeDilated = new Uint8Array(w * h);
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
@@ -211,11 +393,9 @@ function detectIdCardRect(img) {
       }
     }
 
-    // 从四周边界所有无边缘的点进行漫水填充以提取背景，被边缘阻挡的部分保留为前景
     const bgMask = new Uint8Array(w * h);
     const bgQueue = [];
     
-    // 搜集上下左右边缘的种子点
     for (let x = 0; x < w; x++) {
       if (edgeDilated[x] === 0) { bgMask[x] = 1; bgQueue.push(x); }
       const bottomIdx = (h - 1) * w + x;
@@ -228,7 +408,6 @@ function detectIdCardRect(img) {
       if (edgeDilated[rightIdx] === 0 && !bgMask[rightIdx]) { bgMask[rightIdx] = 1; bgQueue.push(rightIdx); }
     }
 
-    // 广度优先漫水填充
     let bgHead = 0;
     while (bgHead < bgQueue.length) {
       const curIdx = bgQueue[bgHead++];
@@ -250,7 +429,6 @@ function detectIdCardRect(img) {
       }
     }
 
-    // 提取前景非背景区域（即 bgMask 为 0 的闭合漏洞区域）
     const fgBin = new Uint8Array(w * h);
     for (let i = 0; i < w * h; i++) {
       fgBin[i] = bgMask[i] === 0 ? 1 : 0;
@@ -258,37 +436,30 @@ function detectIdCardRect(img) {
     const compsEdgeHole = findConnectedComponents(fgBin);
     candidates.push(...compsEdgeHole.map(c => ({ ...c, source: 'edge-hole' })));
 
-    // 6. 多维度评估与打分体系
     let bestCandidate = null;
     let maxScore = -1;
 
     for (const comp of candidates) {
-      // A. 宽高比打分 (身份证 1.586，合理比例容差 [1.1, 2.1])
       const ratio = comp.width / comp.height;
-      const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio; // 完美兼容竖版拍摄的转换
+      const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio;
       if (ratioNorm < 1.1 || ratioNorm > 2.1) continue;
 
       const diff = Math.abs(ratioNorm - 1.586);
-      const scoreRatio = Math.max(0, 1.0 - diff / 0.4); // 越接近 1.586 得分越高
+      const scoreRatio = Math.max(0, 1.0 - diff / 0.4);
 
-      // B. 面积合理性打分 (占比全图的 8% ~ 85%)
       const areaPct = (comp.width * comp.height) / (w * h);
       if (areaPct < 0.08 || areaPct > 0.85) continue;
-      // 倾向于面积中等偏大的矩形 (避开噪点，一般身份证在中心占据 20%~60% 面积)
       const scoreArea = areaPct;
 
-      // C. 图像中心契合度打分 (拍照身份证一般位于图像中央)
       const cx = comp.minX + comp.width / 2;
       const cy = comp.minY + comp.height / 2;
       const distToCenter = Math.sqrt((cx - w / 2) ** 2 + (cy - h / 2) ** 2);
       const maxDist = Math.sqrt((w / 2) ** 2 + (h / 2) ** 2);
       const scoreCenter = 1.0 - distToCenter / maxDist;
 
-      // D. 连通域内部实心填充率过滤 (防止空心细线)
       const fillRatio = comp.area / (comp.width * comp.height);
       if (fillRatio < 0.45) continue;
 
-      // 加权综合得分：宽高比(45%) + 中心度(30%) + 面积合理度(25%)
       const totalScore = scoreRatio * 0.45 + scoreCenter * 0.3 + scoreArea * 0.25;
 
       if (totalScore > maxScore) {
@@ -297,10 +468,11 @@ function detectIdCardRect(img) {
       }
     }
 
-    // 7. 导出最终结果 (如果评分达到基础合理度阈值 0.40)
     if (bestCandidate && maxScore >= 0.40) {
       const scaleX = img.width / w;
       const scaleY = img.height / h;
+      
+      console.log(`💡 [AI Engine] 自研二值化漫水定位成功！通道: ${bestCandidate.source}`);
       return {
         success: true,
         x: Math.round(bestCandidate.minX * scaleX),
@@ -321,6 +493,10 @@ function detectIdCardRect(img) {
 
 export default function IdCardScanner() {
   const { sessionId, logFrontendAction } = useApp();
+
+  // OpenCV.js Wasm 加载状态
+  const [isOpenCvLoaded, setIsOpenCvLoaded] = useState(false);
+  const [isOpenCvLoading, setIsOpenCvLoading] = useState(false);
 
   // 状态管理
   const [frontFile, setFrontFile] = useState(null);
@@ -362,6 +538,49 @@ export default function IdCardScanner() {
   const frontInputRef = useRef(null);
   const backInputRef = useRef(null);
   const previewCanvasRef = useRef(null);
+
+  // OpenCV.js 异步极速按需加载器
+  useEffect(() => {
+    if (window.cv && window.cv.Mat) {
+      setIsOpenCvLoaded(true);
+      return;
+    }
+
+    setIsOpenCvLoading(true);
+
+    if (!window.Module) {
+      window.Module = {};
+    }
+
+    const existingCallback = window.Module.onRuntimeInitialized;
+    window.Module.onRuntimeInitialized = () => {
+      if (existingCallback) {
+        existingCallback();
+      }
+      console.log("🔥 [AI Engine] OpenCV.js WebAssembly compiled & initialized successfully.");
+      setIsOpenCvLoaded(true);
+      setIsOpenCvLoading(false);
+    };
+
+    let script = document.getElementById('opencv-script');
+    if (!script) {
+      script = document.createElement('script');
+      script.id = 'opencv-script';
+      script.src = '/libs/opencv.js';
+      script.async = true;
+      script.type = 'text/javascript';
+      script.onerror = (e) => {
+        console.error("⚠️ [AI Engine] Failed to load OpenCV.js static library:", e);
+        setIsOpenCvLoading(false);
+      };
+      document.body.appendChild(script);
+    } else {
+      if (window.cv && window.cv.Mat) {
+        setIsOpenCvLoaded(true);
+        setIsOpenCvLoading(false);
+      }
+    }
+  }, []);
 
   // 处理正面预览清理
   useEffect(() => {
@@ -437,6 +656,32 @@ export default function IdCardScanner() {
         // 1. 调用边缘检测算法
         const detection = detectIdCardRect(img);
 
+        // A. OpenCV.js 3D 透视校正一键直出
+        if (detection.success && detection.warpedCanvas) {
+          const finalZoom = 1.0;
+          const finalOffset = { x: 0, y: 0 };
+          if (side === 'front') {
+            setFrontOriginal(file);
+            setFrontCropParams({ zoom: finalZoom, offset: finalOffset });
+          } else {
+            setBackOriginal(file);
+            setBackCropParams({ zoom: finalZoom, offset: finalOffset });
+          }
+
+          detection.warpedCanvas.toBlob((blob) => {
+            const croppedUrl = URL.createObjectURL(blob);
+            if (side === 'front') {
+              setFrontFile(new File([blob], "front_cropped.jpg", { type: "image/jpeg" }));
+              setFrontPreview(croppedUrl);
+            } else {
+              setBackFile(new File([blob], "back_cropped.jpg", { type: "image/jpeg" }));
+              setBackPreview(croppedUrl);
+            }
+            setGeneratedPdf(null);
+          }, 'image/jpeg', 0.95);
+          return;
+        }
+
         const frameW = 380;
         const frameH = 240;
         const scaleToFit = Math.max(frameW / img.width, frameH / img.height);
@@ -445,7 +690,7 @@ export default function IdCardScanner() {
         let finalOffset = { x: 0, y: 0 };
 
         if (detection.success) {
-          // A. 成功识别：利用数学公式反算出让身份证正好完美铺满 frame 的 zoom 和 offset
+          // B. 传统边缘或自研算法识别成功
           const { x, y, width, height } = detection;
           finalZoom = Math.min(3.0, Math.max(1.0, frameW / (width * scaleToFit)));
           finalOffset = {
@@ -907,6 +1152,22 @@ export default function IdCardScanner() {
         {/* 左栏：上传与配置面板 */}
         <div className="config-panel">
           
+          {/* AI 引擎状态栏 */}
+          <div className="ai-engine-status-bar">
+            <span className={`status-indicator-dot ${isOpenCvLoaded ? 'loaded' : 'loading'}`}></span>
+            <span className="status-indicator-text">
+              {isOpenCvLoaded ? (
+                <>
+                  <span className="sparkle-icon">✨</span> AI 智能 3D 透视纠偏已就绪
+                </>
+              ) : (
+                <>
+                  <span className="spinner-icon">⏳</span> AI 引擎加载中... (已开启自研算法兜底)
+                </>
+              )}
+            </span>
+          </div>
+
           {/* 上传区域 */}
           <div className="upload-section">
             <h3 className="section-title">📥 1. 上传身份证正反面照片</h3>

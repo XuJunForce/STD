@@ -81,13 +81,24 @@ mini-tool logs --export --format xml     # 导出XML
 
 ## Git规范
 
-**分支**: `feature-xxx` | `bugfix-xxx` | `refactor-xxx` | `docs-xxx`
+**远程仓库**: `master` (本项目使用master而非origin)
+**默认分支**: `main`
+**分支命名**: `feature-xxx` | `bugfix-xxx` | `refactor-xxx` | `docs-xxx`
 
-**工作流**:
-1. 创建分支并开发
-2. 提交代码（清晰message）
-3. Push到GitHub
-4. **合并到main分支**(main分支为default分支)
+**完整工作流**:
+1. 创建功能分支: `git checkout -b feature-xxx`
+2. 开发并提交: `git commit -m "feat: xxx"`
+3. Push功能分支: `git push master feature-xxx`
+4. 切换到main: `git checkout main`
+5. 拉取最新代码: `git pull master main`
+6. 合并功能分支: `git merge feature-xxx`
+7. **Push到GitHub**: `git push master main`
+8. 删除功能分支: `git branch -d feature-xxx` (可选)
+
+**关键提醒**:
+- 本项目远程名称是 `master`，不是 `origin`
+- main是默认分支，所有功能最终合并到main
+- 每次push后验证GitHub上可见
 
 ## UI规范
 

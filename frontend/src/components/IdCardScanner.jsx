@@ -137,9 +137,9 @@ function detectCardByGrabCut(cv, src) {
     candidates.sort((a, b) => b.score - a.score);
     const best = candidates[0];
     
-    // 几何收缩 1.5% 消除边界毛边与影迹
-    const insetX = Math.round(best.width * 0.015);
-    const insetY = Math.round(best.height * 0.015);
+    // 几何收缩 2.5% 消除边界毛边与影迹
+    const insetX = Math.round(best.width * 0.025);
+    const insetY = Math.round(best.height * 0.025);
     const newX = best.x + insetX;
     const newY = best.y + insetY;
     const newWidth = best.width - insetX * 2;
@@ -155,8 +155,8 @@ function detectCardByGrabCut(cv, src) {
     const resized = new cv.Mat();
     cv.resize(roi, resized, new cv.Size(856, 540), 0, 0, cv.INTER_LANCZOS4);
 
-    // 绘制一圈 6 像素纯白边框遮挡边缘毛刺 (线粗为 12 像素，中心对齐刚好覆盖 6 像素)
-    cv.rectangle(resized, new cv.Point(0, 0), new cv.Point(resized.cols, resized.rows), new cv.Scalar(255, 255, 255, 255), 12);
+    // 绘制一圈 12 像素纯白边框遮挡边缘毛刺 (线粗为 24 像素，中心对齐刚好覆盖 12 像素)
+    cv.rectangle(resized, new cv.Point(0, 0), new cv.Point(resized.cols, resized.rows), new cv.Scalar(255, 255, 255, 255), 24);
 
     const warpedCanvas = document.createElement('canvas');
     warpedCanvas.width = 856;
@@ -377,12 +377,12 @@ function detectIdCardRect(img) {
           sortedPts[2] = pts[br_idx];
           sortedPts[3] = pts[bl_idx];
         }
-        // 几何收缩角点 1.5% 向中心收缩，消除边界残留的背景与投影毛边
+        // 几何收缩角点 4.0% 向中心收缩，消除边界残留的背景与投影毛边
         let cx = (sortedPts[0].x + sortedPts[1].x + sortedPts[2].x + sortedPts[3].x) / 4;
         let cy = (sortedPts[0].y + sortedPts[1].y + sortedPts[2].y + sortedPts[3].y) / 4;
         for (let k = 0; k < 4; k++) {
-          sortedPts[k].x = cx + (sortedPts[k].x - cx) * 0.985;
-          sortedPts[k].y = cy + (sortedPts[k].y - cy) * 0.985;
+          sortedPts[k].x = cx + (sortedPts[k].x - cx) * 0.96;
+          sortedPts[k].y = cy + (sortedPts[k].y - cy) * 0.96;
         }
 
         // 进行透视变换，拉平为 856x540 的标准比例
@@ -404,8 +404,8 @@ function detectIdCardRect(img) {
         cv.warpPerspective(src, warpedMat, transMat, new cv.Size(856, 540), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
         
         // -------------------- 纯物理白边覆盖（比二值化更安全，绝不损坏人像与文字） --------------------
-        // 绘制一圈 6 像素纯白边框以消除毛刺 (线宽 12)
-        cv.rectangle(warpedMat, new cv.Point(0, 0), new cv.Point(warpedMat.cols, warpedMat.rows), new cv.Scalar(255, 255, 255, 255), 12);
+        // 绘制一圈 12 像素纯白边框以消除毛刺 (线宽 24)
+        cv.rectangle(warpedMat, new cv.Point(0, 0), new cv.Point(warpedMat.cols, warpedMat.rows), new cv.Scalar(255, 255, 255, 255), 24);
 
         // 显示最终清理后的图像
         const warpedCanvas = document.createElement('canvas');

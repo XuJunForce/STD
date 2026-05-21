@@ -219,9 +219,9 @@ def crop_by_grabcut(image: np.ndarray) -> np.ndarray | None:
 
     _, x, y, w, h = sorted(candidates, reverse=True, key=lambda item: item[0])[0]
     
-    # 向内收缩 1.5% 以去除 GrabCut 边界可能带有的背景毛边与虚影
-    inset_px_w = int(w * 0.015)
-    inset_px_h = int(h * 0.015)
+    # 向内收缩 2.5% 以去除 GrabCut 边界可能带有的背景毛边与虚影
+    inset_px_w = int(w * 0.025)
+    inset_px_h = int(h * 0.025)
     x += inset_px_w
     y += inset_px_h
     w -= inset_px_w * 2
@@ -246,8 +246,8 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     grabcut_crop = crop_by_grabcut(image)
     if grabcut_crop is not None:
         cropped_resized = cv2.resize(grabcut_crop, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
-        # 绘制纯物理白边遮挡边缘
-        cropped_resized = add_white_border(cropped_resized, thickness=8)
+        # 绘制纯物理白边遮挡边缘 (thickness=16, 覆盖 16 像素，线宽 32)
+        cropped_resized = add_white_border(cropped_resized, thickness=16)
         success, encoded_img = cv2.imencode(".jpg", cropped_resized)
         if not success:
             raise ValueError("图片编码失败")
@@ -332,8 +332,8 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
     card_pts = candidates[0][1]
 
-    # 几何收缩角点 1.5% 向中心收缩，消除边界残留的背景与投影毛边
-    shrunk_pts = shrink_quad(card_pts, factor=0.985)
+    # 几何收缩角点 4.0% 向中心收缩，消除边界残留的背景与投影毛边
+    shrunk_pts = shrink_quad(card_pts, factor=0.96)
 
     # 7. 透视矫正并裁剪
     cropped = four_point_transform(original, shrunk_pts)
@@ -346,8 +346,8 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     # 强行缩放到 1:1 标准高精尺寸 1063 x 710，采用 Lanczos4 获最高品质
     cropped_resized = cv2.resize(cropped, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
 
-    # 绘制纯物理白边以遮盖边缘毛刺
-    cropped_resized = add_white_border(cropped_resized, thickness=8)
+    # 绘制纯物理白边以遮盖边缘毛刺 (thickness=16, 覆盖 16 像素，线宽 32)
+    cropped_resized = add_white_border(cropped_resized, thickness=16)
 
     # 编码回 bytes
     success, encoded_img = cv2.imencode(".jpg", cropped_resized)

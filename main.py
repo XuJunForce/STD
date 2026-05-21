@@ -147,9 +147,9 @@ def crop_by_grabcut(image):
 
     _, x, y, w, h = sorted(candidates, reverse=True, key=lambda item: item[0])[0]
     
-    # 向内收缩 1.5% 以去除 GrabCut 边界可能带有的背景毛边与虚影
-    inset_px_w = int(w * 0.015)
-    inset_px_h = int(h * 0.015)
+    # 向内收缩 2.5% 以去除 GrabCut 边界可能带有的背景毛边与虚影
+    inset_px_w = int(w * 0.025)
+    inset_px_h = int(h * 0.025)
     x += inset_px_w
     y += inset_px_h
     w -= inset_px_w * 2
@@ -171,9 +171,9 @@ def crop_id_card(image_path, output_path="id_card_crop.jpg", debug=False):
     if grabcut_crop is not None:
         if debug:
             print("成功使用 GrabCut 前景分割定位身份证主体")
-        # 统一缩放到高清晰度尺寸并增加白边
+        # 统一缩放到高清晰度尺寸并增加白边 (thickness=16, 覆盖 16 像素，线宽 32)
         cleaned_resized = cv2.resize(grabcut_crop, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
-        cleaned_resized = add_white_border(cleaned_resized, thickness=8)
+        cleaned_resized = add_white_border(cleaned_resized, thickness=16)
         cv2.imwrite(output_path, cleaned_resized)
         return output_path
 
@@ -276,7 +276,7 @@ def crop_id_card(image_path, output_path="id_card_crop.jpg", debug=False):
     card_pts = best_candidate[3]
 
     # 7. 透视矫正并裁剪
-    shrunk_pts = shrink_quad(card_pts, factor=0.985)
+    shrunk_pts = shrink_quad(card_pts, factor=0.96)
     cropped = four_point_transform(original, shrunk_pts)
 
     # 如果裁剪后是竖着的，可以自动转正
@@ -287,8 +287,8 @@ def crop_id_card(image_path, output_path="id_card_crop.jpg", debug=False):
     # 强行缩放到 1:1 标准高精尺寸 1063 x 710，采用 Lanczos4 获最高品质
     cropped_resized = cv2.resize(cropped, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
 
-    # 绘制纯物理白边以遮盖边缘毛刺
-    cropped_resized = add_white_border(cropped_resized, thickness=8)
+    # 绘制纯物理白边以遮盖边缘毛刺 (thickness=16, 覆盖 16 像素，线宽 32)
+    cropped_resized = add_white_border(cropped_resized, thickness=16)
 
     cv2.imwrite(output_path, cropped_resized)
 

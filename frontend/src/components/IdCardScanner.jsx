@@ -31,6 +31,164 @@ function getRotatedRectPoints(rotatedRect) {
   ];
 }
 
+const ID_CARD_RATIO = 85.6 / 54.0;
+
+function expandToIdCardRect(x, y, width, height, imgWidth, imgHeight) {
+  const pad = 0.01;
+  let nextWidth = width * (1 + pad * 2);
+  let nextHeight = height * (1 + pad * 2);
+
+  if (nextWidth / nextHeight > ID_CARD_RATIO) {
+    nextHeight = nextWidth / ID_CARD_RATIO;
+  } else {
+    nextWidth = nextHeight * ID_CARD_RATIO;
+  }
+
+  const cx = x + width / 2;
+  let left = Math.round(cx - nextWidth / 2);
+  let top = Math.round(y - height * pad);
+
+  if (left < 0) left = 0;
+  if (top < 0) top = 0;
+  if (left + nextWidth > imgWidth) left = Math.max(0, Math.round(imgWidth - nextWidth));
+  if (top + nextHeight > imgHeight) top = Math.max(0, Math.round(imgHeight - nextHeight));
+
+  return {
+    x: left,
+    y: top,
+    width: Math.min(imgWidth - left, Math.round(nextWidth)),
+    height: Math.min(imgHeight - top, Math.round(nextHeight))
+  };
+}
+
+function detectCardByGrabCut(cv, src) {
+  if (!cv.grabCut || !cv.Rect || typeof cv.GC_INIT_WITH_RECT === 'undefined') {
+    return null;
+  }
+
+  let rgb = new cv.Mat();
+  let mask = null;
+  let bgdModel = null;
+  let fgdModel = null;
+  let foreground = null;
+  let closed = null;
+  let opened = null;
+  let closeKernel = null;
+  let openKernel = null;
+  let contours = null;
+  let hierarchy = null;
+
+  try {
+    cv.cvtColor(src, rgb, cv.COLOR_RGBA2RGB);
+    const imgWidth = src.cols;
+    const imgHeight = src.rows;
+    const imgArea = imgWidth * imgHeight;
+    const margin = 0.08;
+    const rect = new cv.Rect(
+      Math.round(imgWidth * margin),
+      Math.round(imgHeight * margin),
+      Math.round(imgWidth * (1 - 2 * margin)),
+      Math.round(imgHeight * (1 - 2 * margin))
+    );
+
+    mask = cv.Mat.zeros(imgHeight, imgWidth, cv.CV_8UC1);
+    bgdModel = new cv.Mat(1, 65, cv.CV_64FC1, new cv.Scalar(0));
+    fgdModel = new cv.Mat(1, 65, cv.CV_64FC1, new cv.Scalar(0));
+    cv.grabCut(rgb, mask, rect, bgdModel, fgdModel, 3, cv.GC_INIT_WITH_RECT);
+
+    foreground = cv.Mat.zeros(imgHeight, imgWidth, cv.CV_8UC1);
+    for (let i = 0; i < mask.data.length; i++) {
+      const value = mask.data[i];
+      foreground.data[i] = (value === cv.GC_FGD || value === cv.GC_PR_FGD) ? 255 : 0;
+    }
+
+    closed = new cv.Mat();
+    opened = new cv.Mat();
+    closeKernel = cv.getStructuringElement(cv.MORPH_RECT, new cv.Size(21, 21));
+    openKernel = cv.getStructuringElement(cv.MORPH_ELLIPSE, new cv.Size(5, 5));
+    cv.morphologyEx(foreground, closed, cv.MORPH_CLOSE, closeKernel);
+    cv.morphologyEx(closed, opened, cv.MORPH_OPEN, openKernel);
+
+    contours = new cv.MatVector();
+    hierarchy = new cv.Mat();
+    cv.findContours(opened, contours, hierarchy, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE);
+
+    const candidates = [];
+    for (let i = 0; i < contours.size(); i++) {
+      const contour = contours.get(i);
+      const area = cv.contourArea(contour);
+      if (area >= imgArea * 0.10 && area <= imgArea * 0.80) {
+        const box = cv.boundingRect(contour);
+        if (box.width > 0 && box.height > 0) {
+          const ratio = Math.max(box.width, box.height) / Math.min(box.width, box.height);
+          if (ratio >= 1.3 && ratio <= 2.05) {
+            const score = area * (1.0 - Math.abs(ratio - ID_CARD_RATIO) / ID_CARD_RATIO);
+            candidates.push({ score, ...box });
+          }
+        }
+      }
+      contour.delete();
+    }
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    const best = candidates[0];
+    
+    // 几何收缩 1.5% 消除边界毛边与影迹
+    const insetX = Math.round(best.width * 0.015);
+    const insetY = Math.round(best.height * 0.015);
+    const newX = best.x + insetX;
+    const newY = best.y + insetY;
+    const newWidth = best.width - insetX * 2;
+    const newHeight = best.height - insetY * 2;
+
+    const expanded = expandToIdCardRect(newX, newY, newWidth, newHeight, imgWidth, imgHeight);
+    if (expanded.width <= 0 || expanded.height <= 0) {
+      return null;
+    }
+
+    const cropRect = new cv.Rect(expanded.x, expanded.y, expanded.width, expanded.height);
+    const roi = src.roi(cropRect);
+    const resized = new cv.Mat();
+    cv.resize(roi, resized, new cv.Size(856, 540), 0, 0, cv.INTER_LANCZOS4);
+
+    // 绘制一圈 6 像素纯白边框遮挡边缘毛刺 (线粗为 12 像素，中心对齐刚好覆盖 6 像素)
+    cv.rectangle(resized, new cv.Point(0, 0), new cv.Point(resized.cols, resized.rows), new cv.Scalar(255, 255, 255, 255), 12);
+
+    const warpedCanvas = document.createElement('canvas');
+    warpedCanvas.width = 856;
+    warpedCanvas.height = 540;
+    cv.imshow(warpedCanvas, resized);
+
+    roi.delete();
+    resized.delete();
+
+    return {
+      success: true,
+      warpedCanvas,
+      source: 'opencv-grabcut'
+    };
+  } catch (error) {
+    console.warn("⚠️ OpenCV.js GrabCut card segmentation failed, falling back to contour detection:", error);
+    return null;
+  } finally {
+    if (rgb) rgb.delete();
+    if (mask) mask.delete();
+    if (bgdModel) bgdModel.delete();
+    if (fgdModel) fgdModel.delete();
+    if (foreground) foreground.delete();
+    if (closed) closed.delete();
+    if (opened) opened.delete();
+    if (closeKernel) closeKernel.delete();
+    if (openKernel) openKernel.delete();
+    if (contours) contours.delete();
+    if (hierarchy) hierarchy.delete();
+  }
+}
+
 /**
  * 纯前端高性能身份证智能透视校正与边缘提取算法 (OpenCV.js Wasm 纠偏 + 自研双向二值化漫水填充 + 多维度几何打分)
  * @param {HTMLImageElement} img 原始Image对象
@@ -44,6 +202,13 @@ function detectIdCardRect(img) {
       
       // 1. 读取原图为 Mat
       let src = cv.imread(img);
+      const grabCutDetection = detectCardByGrabCut(cv, src);
+      if (grabCutDetection) {
+        src.delete();
+        console.log("🔥 [AI Engine] OpenCV.js GrabCut 前景分割定位成功！");
+        return grabCutDetection;
+      }
+
       let gray = new cv.Mat();
       let blurred = new cv.Mat();
       
@@ -110,8 +275,8 @@ function detectIdCardRect(img) {
         let contour = contours.get(i);
         let area = cv.contourArea(contour);
         
-        // 降低面积下限至 3%，确保即使身份证在镜头中占比较小也能完美召回
-        if (area < imgArea * 0.03) {
+        // 限制面积并拒绝整图外框，避免把照片边界或背景纹理误判为身份证
+        if (area < imgArea * 0.03 || area > imgArea * 0.80) {
           contour.delete();
           continue;
         }
@@ -149,6 +314,14 @@ function detectIdCardRect(img) {
             let maxY = Math.max(...pts.map(p => p.y));
             let w = maxX - minX;
             let h = maxY - minY;
+            const touchesFrame =
+              minX <= 2 ||
+              minY <= 2 ||
+              maxX >= src.cols - 2 ||
+              maxY >= src.rows - 2;
+            if (touchesFrame) {
+              continue;
+            }
             
             if (w > 0 && h > 0) {
               let ratio = Math.max(w, h) / Math.min(w, h);
@@ -204,11 +377,15 @@ function detectIdCardRect(img) {
           sortedPts[2] = pts[br_idx];
           sortedPts[3] = pts[bl_idx];
         }
-        
-        let warpedCanvas = document.createElement('canvas');
-        warpedCanvas.width = 856;
-        warpedCanvas.height = 540;
-        
+        // 几何收缩角点 1.5% 向中心收缩，消除边界残留的背景与投影毛边
+        let cx = (sortedPts[0].x + sortedPts[1].x + sortedPts[2].x + sortedPts[3].x) / 4;
+        let cy = (sortedPts[0].y + sortedPts[1].y + sortedPts[2].y + sortedPts[3].y) / 4;
+        for (let k = 0; k < 4; k++) {
+          sortedPts[k].x = cx + (sortedPts[k].x - cx) * 0.985;
+          sortedPts[k].y = cy + (sortedPts[k].y - cy) * 0.985;
+        }
+
+        // 进行透视变换，拉平为 856x540 的标准比例
         let srcTri = cv.matFromArray(4, 1, cv.CV_32FC2, [
           sortedPts[0].x, sortedPts[0].y,
           sortedPts[1].x, sortedPts[1].y,
@@ -224,18 +401,18 @@ function detectIdCardRect(img) {
         
         let transMat = cv.getPerspectiveTransform(srcTri, dstTri);
         let warpedMat = new cv.Mat();
-        cv.warpPerspective(
-          src,
-          warpedMat,
-          transMat,
-          new cv.Size(856, 540),
-          cv.INTER_LINEAR,
-          cv.BORDER_CONSTANT,
-          new cv.Scalar()
-        );
+        cv.warpPerspective(src, warpedMat, transMat, new cv.Size(856, 540), cv.INTER_LINEAR, cv.BORDER_CONSTANT, new cv.Scalar());
         
+        // -------------------- 纯物理白边覆盖（比二值化更安全，绝不损坏人像与文字） --------------------
+        // 绘制一圈 6 像素纯白边框以消除毛刺 (线宽 12)
+        cv.rectangle(warpedMat, new cv.Point(0, 0), new cv.Point(warpedMat.cols, warpedMat.rows), new cv.Scalar(255, 255, 255, 255), 12);
+
+        // 显示最终清理后的图像
+        const warpedCanvas = document.createElement('canvas');
+        warpedCanvas.width = 856;
+        warpedCanvas.height = 540;
         cv.imshow(warpedCanvas, warpedMat);
-        
+        // -------------------------------------------------------
         // 垃圾回收，绝不泄露
         src.delete();
         dilated.delete();
@@ -245,8 +422,7 @@ function detectIdCardRect(img) {
         dstTri.delete();
         transMat.delete();
         warpedMat.delete();
-        
-        console.log("🔥 [AI Engine] OpenCV.js Wasm 智能多重拟合与透视纠偏成功！得分:", best.score);
+        console.log("🔥 [AI Engine] OpenCV.js Wasm 智能透视收缩与白边裁切成功！得分:", best.score);
         return {
           success: true,
           warpedCanvas,
@@ -266,8 +442,17 @@ function detectIdCardRect(img) {
       for (let i = 0; i < tempContours.size(); ++i) {
         let contour = tempContours.get(i);
         let area = cv.contourArea(contour);
-        if (area > imgArea * 0.05 && area < imgArea * 0.95) {
+        if (area > imgArea * 0.05 && area < imgArea * 0.80) {
           let rect = cv.boundingRect(contour);
+          const touchesFrame =
+            rect.x <= 2 ||
+            rect.y <= 2 ||
+            rect.x + rect.width >= src.cols - 2 ||
+            rect.y + rect.height >= src.rows - 2;
+          if (touchesFrame) {
+            contour.delete();
+            continue;
+          }
           const ratio = rect.width / rect.height;
           const ratioNorm = ratio < 1.0 ? 1.0 / ratio : ratio;
           

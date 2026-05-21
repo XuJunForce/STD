@@ -118,6 +118,122 @@ def four_point_transform(image, pts):
     return warped
 
 
+ID_CARD_RATIO = 85.6 / 54.0
+
+
+def expand_to_id_card_rect(x: int, y: int, w: int, h: int, img_w: int, img_h: int) -> Tuple[int, int, int, int]:
+    """Expand a detected card foreground box to the standard ID-card ratio."""
+    pad = 0.01
+    width = w * (1 + pad * 2)
+    height = h * (1 + pad * 2)
+
+    if width / height > ID_CARD_RATIO:
+        height = width / ID_CARD_RATIO
+    else:
+        width = height * ID_CARD_RATIO
+
+    cx = x + w / 2
+    left = int(round(cx - width / 2))
+    top = int(round(y - h * pad))
+
+    if left < 0:
+        left = 0
+    if top < 0:
+        top = 0
+    if left + width > img_w:
+        left = max(0, int(round(img_w - width)))
+    if top + height > img_h:
+        top = max(0, int(round(img_h - height)))
+
+    width = min(img_w - left, int(round(width)))
+    height = min(img_h - top, int(round(height)))
+    return left, top, width, height
+
+
+def shrink_quad(pts, factor=0.985):
+    """将4个角点向中心收缩指定的比例，默认收缩1.5%"""
+    center = np.mean(pts, axis=0)
+    shrunk = []
+    for pt in pts:
+        shrunk.append(center + (pt - center) * factor)
+    return np.array(shrunk, dtype="float32")
+
+
+def add_white_border(image, thickness=8):
+    """给图像边缘绘制一圈纯白色边框，遮盖任何残存的细微毛边"""
+    h, w = image.shape[:2]
+    # 绘制纯白色矩形边框覆盖边缘 (thickness * 2 像素线宽)
+    cv2.rectangle(image, (0, 0), (w, h), (255, 255, 255), thickness * 2)
+    return image
+
+
+def crop_by_grabcut(image: np.ndarray) -> np.ndarray | None:
+    """Segment the card from busy fabric backgrounds before contour fallback."""
+    img_h, img_w = image.shape[:2]
+    img_area = img_h * img_w
+    margin = 0.08
+    rect = (
+        int(img_w * margin),
+        int(img_h * margin),
+        int(img_w * (1 - 2 * margin)),
+        int(img_h * (1 - 2 * margin)),
+    )
+
+    mask = np.zeros((img_h, img_w), np.uint8)
+    bg_model = np.zeros((1, 65), np.float64)
+    fg_model = np.zeros((1, 65), np.float64)
+
+    try:
+        cv2.grabCut(image, mask, rect, bg_model, fg_model, 3, cv2.GC_INIT_WITH_RECT)
+    except cv2.error:
+        return None
+
+    foreground = np.where((mask == cv2.GC_FGD) | (mask == cv2.GC_PR_FGD), 255, 0).astype("uint8")
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (21, 21))
+    foreground = cv2.morphologyEx(foreground, cv2.MORPH_CLOSE, kernel)
+    foreground = cv2.morphologyEx(
+        foreground,
+        cv2.MORPH_OPEN,
+        cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5)),
+    )
+
+    contours, _ = cv2.findContours(foreground, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    candidates = []
+
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < img_area * 0.10 or area > img_area * 0.80:
+            continue
+
+        x, y, w, h = cv2.boundingRect(cnt)
+        if w == 0 or h == 0:
+            continue
+
+        ratio = max(w, h) / min(w, h)
+        if 1.30 <= ratio <= 2.05:
+            score = area * (1.0 - abs(ratio - ID_CARD_RATIO) / ID_CARD_RATIO)
+            candidates.append((score, x, y, w, h))
+
+    if not candidates:
+        return None
+
+    _, x, y, w, h = sorted(candidates, reverse=True, key=lambda item: item[0])[0]
+    
+    # 向内收缩 1.5% 以去除 GrabCut 边界可能带有的背景毛边与虚影
+    inset_px_w = int(w * 0.015)
+    inset_px_h = int(h * 0.015)
+    x += inset_px_w
+    y += inset_px_h
+    w -= inset_px_w * 2
+    h -= inset_px_h * 2
+
+    x, y, w, h = expand_to_id_card_rect(x, y, w, h, img_w, img_h)
+    if w <= 0 or h <= 0:
+        return None
+
+    return image[y:y + h, x:x + w]
+
+
 def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     """使用本地 OpenCV 进行身份证边框检测与 3D 透视扶正裁剪，返回裁剪后的图片 bytes。
     如果未检测到身份证边框，抛出 ValueError，由上层捕获降级。
@@ -126,6 +242,16 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if image is None:
         raise ValueError("图片解码失败")
+
+    grabcut_crop = crop_by_grabcut(image)
+    if grabcut_crop is not None:
+        cropped_resized = cv2.resize(grabcut_crop, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
+        # 绘制纯物理白边遮挡边缘
+        cropped_resized = add_white_border(cropped_resized, thickness=8)
+        success, encoded_img = cv2.imencode(".jpg", cropped_resized)
+        if not success:
+            raise ValueError("图片编码失败")
+        return encoded_img.tobytes()
 
     original = image.copy()
     img_area = image.shape[0] * image.shape[1]
@@ -159,8 +285,8 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     for cnt in contours:
         area = cv2.contourArea(cnt)
 
-        # 降低面积阈值，从5%降到3%
-        if area < img_area * 0.03:
+        # 限制面积并拒绝整图外框，避免把照片边界或背景纹理误判为身份证
+        if area < img_area * 0.03 or area > img_area * 0.80:
             continue
 
         # 多边形拟合，尝试不同的精度
@@ -180,6 +306,9 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
                     pts = approx.reshape(-1, 2)
 
                 x, y, w, h = cv2.boundingRect(pts)
+                touches_frame = x <= 2 or y <= 2 or x + w >= image.shape[1] - 2 or y + h >= image.shape[0] - 2
+                if touches_frame:
+                    continue
                 
                 if w == 0 or h == 0:
                     continue
@@ -203,8 +332,11 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
     candidates = sorted(candidates, key=lambda x: x[0], reverse=True)
     card_pts = candidates[0][1]
 
+    # 几何收缩角点 1.5% 向中心收缩，消除边界残留的背景与投影毛边
+    shrunk_pts = shrink_quad(card_pts, factor=0.985)
+
     # 7. 透视矫正并裁剪
-    cropped = four_point_transform(original, card_pts)
+    cropped = four_point_transform(original, shrunk_pts)
 
     # 如果裁剪后是竖着的，自动转正
     h, w = cropped.shape[:2]
@@ -213,6 +345,9 @@ def crop_id_card_bytes(img_bytes: bytes) -> bytes:
 
     # 强行缩放到 1:1 标准高精尺寸 1063 x 710，采用 Lanczos4 获最高品质
     cropped_resized = cv2.resize(cropped, (1063, 710), interpolation=cv2.INTER_LANCZOS4)
+
+    # 绘制纯物理白边以遮盖边缘毛刺
+    cropped_resized = add_white_border(cropped_resized, thickness=8)
 
     # 编码回 bytes
     success, encoded_img = cv2.imencode(".jpg", cropped_resized)

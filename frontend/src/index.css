@@ -38,6 +38,45 @@
   /* Transitions */
   --transition-smooth: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
   --transition-elastic: all 0.5s cubic-bezier(0.68, -0.6, 0.32, 1.6);
+
+  /* Text colors - Dark Mode Default */
+  --text-title: #FFFFFF;
+  --text-primary: #E2E8F0;
+  --text-secondary: #94A3B8;
+  --text-muted: #64748B;
+  --text-pure: #FFFFFF;
+  --logo-text-color: #FFFFFF;
+}
+
+[data-theme="light"] {
+  /* Color Palette - Premium iOS Light Mode */
+  --bg-main: #F2F2F7;
+  --bg-card: rgba(255, 255, 255, 0.85);
+  --bg-sidebar: #FFFFFF;
+  --bg-sidebar-collapsed: #E5E5EA;
+  --bg-pill: rgba(0, 0, 0, 0.04);
+  --bg-pill-hover: rgba(0, 0, 0, 0.08);
+  --border-color: rgba(0, 0, 0, 0.08);
+  --border-color-hover: rgba(0, 0, 0, 0.15);
+
+  /* Glowing Gradients updated for Light Mode readability */
+  --glow-cyan: #007AFF; /* iOS system blue */
+  --glow-purple: #AF52DE; /* iOS system purple */
+  --glow-gradient: linear-gradient(135deg, #007AFF 0%, #5AC8FA 100%);
+  --glow-gradient-hover: linear-gradient(135deg, #5AC8FA 0%, #007AFF 100%);
+
+  /* Shadows adjusted for light mode */
+  --shadow-ambient: 0 8px 32px 0 rgba(0, 0, 0, 0.08);
+  --shadow-glow: 0 0 15px rgba(0, 122, 255, 0.15);
+  --shadow-glow-purple: 0 0 15px rgba(175, 82, 222, 0.15);
+
+  /* Text colors - Light Mode */
+  --text-title: #1C1C1E;
+  --text-primary: #2C2C2E;
+  --text-secondary: #3A3A3C;
+  --text-muted: #8E8E93;
+  --text-pure: #000000;
+  --logo-text-color: #1C1C1E;
 }
 
 * {
@@ -50,11 +89,12 @@
 
 body {
   background-color: var(--bg-main);
-  color: #E2E8F0;
+  color: var(--text-primary);
   font-family: var(--font-sans);
   overflow: hidden;
   height: 100vh;
   width: 100vw;
+  transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 /* Background Glowing Ambient Orbs */
@@ -99,10 +139,10 @@ button {
 
 input, textarea, select {
   font-family: var(--font-sans);
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-pill);
   border: 1px solid var(--border-color);
   border-radius: 8px;
-  color: #F8FAFC;
+  color: var(--text-primary);
   padding: 10px 14px;
   outline: none;
   transition: var(--transition-smooth);

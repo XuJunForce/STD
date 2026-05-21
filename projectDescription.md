@@ -186,37 +186,61 @@
 
 ### 需求 10: CLI接口设计
 
-**用户故事:** 作为AI代理，我希望通过命令行接口调用平台工具，以便自动化执行各种任务。
+**用户故事:** 作为AI代理，我希望通过命令行接口以自然语言或具体子命令的形式调用平台工具，实现高效的自动化任务调度。
+
+#### CLI 工作流 (Agentic Workflow)
+
+小工具平台的 CLI 应该按以下智能 Agent 工作流进行设计与执行：
+```
+用户输入自然语言 (User Natural Language Input)
+    ↓
+CLI 接收问题 (CLI Receives the Question)
+    ↓
+Agent / LLM 负责理解问题 (Agent/LLM Understands & Parses Intent)
+    ↓
+Tool Registry 工具说明列表 (Tool Registry Index, i.e., toolDescription.md)
+    ↓
+选择具体工具 (Select Specific Tool Module)
+    ↓
+调用 backend/services 里的真实函数 (Invoke Real Function in backend/services)
+```
 
 #### 验收标准
 
-1. THE CLI_Interface SHALL provide command-line access to all Tool_Module functions
-2. THE CLI_Interface SHALL accept parameters through command-line arguments
-3. THE CLI_Interface SHALL support --help flag for each command to display usage information
-4. THE CLI_Interface SHALL use consistent command naming convention (kebab-case)
-5. THE CLI_Interface SHALL return structured output in JSON format by default
-6. WHERE --output-format is specified, THE CLI_Interface SHALL support multiple output formats (json, text, csv)
-7. WHEN invalid parameters are provided, THE CLI_Interface SHALL return descriptive error messages with exit code 1
-8. THE CLI_Interface SHALL support --verbose flag for detailed operation logging
-9. THE CLI_Interface SHALL implement timeout handling for long-running operations
-10. THE CLI_Interface SHALL provide progress indicators for operations exceeding 5 seconds
+1. THE CLI_Interface SHALL be named mini-tool (e.g., running via "mini-tool" command or wrapper script)
+2. THE CLI_Interface SHALL support agentic execution flow for natural language requests using the Agentic Workflow defined above
+3. THE CLI_Interface SHALL accept parameters through command-line arguments and standard input (stdin)
+4. THE CLI_Interface SHALL support --help flag for each command to display usage information
+5. THE CLI_Interface SHALL use consistent command naming convention (kebab-case)
+6. THE CLI_Interface SHALL return structured output in JSON format by default
+7. WHERE --output-format is specified, THE CLI_Interface SHALL support multiple output formats (json, text, csv)
+8. WHEN invalid parameters are provided, THE CLI_Interface SHALL return descriptive error messages with exit code 1
+9. THE CLI_Interface SHALL support --verbose flag for detailed operation logging
+10. THE CLI_Interface SHALL implement timeout handling for long-running operations
+11. THE CLI_Interface SHALL provide progress indicators for operations exceeding 5 seconds
 
 ### 需求 11: 工具命令行调用
 
-**用户故事:** 作为AI代理，我希望能够通过统一的命令行接口调用不同的工具功能。
+**用户故事:** 作为AI代理，我希望能够通过统一的命令行接口调用不同的工具功能与监控调用链路。
 
 #### 验收标准
 
-1. THE Command_Parser SHALL support tool-specific subcommands (e.g., mini-tools pdf-merge, mini-tools image-convert)
-2. THE CLI_Interface SHALL validate required parameters before executing tool operations
-3. WHEN a tool requires file inputs, THE CLI_Interface SHALL verify file existence and accessibility
-4. THE CLI_Interface SHALL support batch operations through file list parameters
-5. THE CLI_Interface SHALL provide dry-run mode (--dry-run) to preview operations without execution
-6. THE CLI_Interface SHALL support configuration files for complex parameter sets
-7. THE CLI_Interface SHALL implement proper error handling with meaningful exit codes
-8. THE CLI_Interface SHALL log all operations to a configurable log file
-9. THE CLI_Interface SHALL support parallel execution for independent operations
-10. THE CLI_Interface SHALL provide operation status and progress feedback
+1. THE CLI_Interface SHALL support tool-specific subcommands (e.g., mini-tool pdf-merge, mini-tool image-convert)
+2. THE Command_Parser SHALL support trace logs query and maintenance commands under "mini-tool logs" namespace:
+   - mini-tool logs --all: Query and list all trace logs
+   - mini-tool logs --search <query>: Filter and search logs by session ID, tool type, or status
+   - mini-tool logs --id <id> [--format json|xml]: Fetch a single log detail in detailed JSON or XML format
+   - mini-tool logs --clear: Clear all logs from the database
+   - mini-tool logs --export --format <json|xml> [--output <file>]: Export all trace logs to XML or JSON format
+3. THE CLI_Interface SHALL validate required parameters before executing tool operations
+4. WHEN a tool requires file inputs, THE CLI_Interface SHALL verify file existence and accessibility
+5. THE CLI_Interface SHALL support batch operations through file list parameters
+6. THE CLI_Interface SHALL provide dry-run mode (--dry-run) to preview operations without execution
+7. THE CLI_Interface SHALL support configuration files for complex parameter sets
+8. THE CLI_Interface SHALL implement proper error handling with meaningful exit codes
+9. THE CLI_Interface SHALL log all operations to a configurable log file
+10. THE CLI_Interface SHALL support parallel execution for independent operations
+11. THE CLI_Interface SHALL provide operation status and progress feedback
 
 ### 需求 12: AI友好的接口设计
 

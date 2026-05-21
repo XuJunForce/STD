@@ -31,23 +31,23 @@
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: var(--bg-pill);
   border: 1px solid var(--border-color);
-  color: #94A3B8;
+  color: var(--text-secondary);
   font-size: 0.8rem;
   transition: var(--transition-smooth);
 }
 
 .toggle-sidebar-btn:hover {
-  background: rgba(255, 255, 255, 0.08);
-  color: #fff;
+  background: var(--bg-pill-hover);
+  color: var(--text-pure);
   border-color: var(--glow-cyan);
 }
 
 .sidebar-title {
   font-size: 0.95rem;
   font-weight: 600;
-  color: #F1F5F9;
+  color: var(--text-title);
   letter-spacing: 0.5px;
 }
 
@@ -69,16 +69,16 @@
   border-radius: 12px;
   background: transparent;
   border: 1px solid transparent;
-  color: #94A3B8;
+  color: var(--text-secondary);
   text-align: left;
   transition: var(--transition-smooth);
   width: 100%;
 }
 
 .menu-item:hover {
-  background: rgba(255, 255, 255, 0.02);
-  color: #fff;
-  border-color: rgba(255, 255, 255, 0.05);
+  background: var(--bg-pill-hover);
+  color: var(--text-pure);
+  border-color: var(--border-color);
 }
 
 .menu-item.active {
@@ -110,7 +110,7 @@
 
 .menu-desc {
   font-size: 0.7rem;
-  color: #64748B;
+  color: var(--text-muted);
   white-space: nowrap;
   text-overflow: ellipsis;
   overflow: hidden;

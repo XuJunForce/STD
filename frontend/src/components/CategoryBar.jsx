@@ -3,11 +3,15 @@ import { useApp } from '../context/AppContext';
 import './CategoryBar.css';
 
 export default function CategoryBar() {
-  const { categories, activeCategory, changeCategory } = useApp();
+  const { categories, activeCategory, changeCategory, setIsSettingsOpen } = useApp();
 
   return (
     <div className="category-bar glass-panel">
-      <div className="logo-section">
+      <div 
+        className="logo-section" 
+        onClick={() => setIsSettingsOpen(true)}
+        title="点击打开系统设置 (Settings)"
+      >
         <span className="logo-pulse"></span>
         <span className="logo-text">Toolbox<span className="text-glow">.io</span></span>
       </div>

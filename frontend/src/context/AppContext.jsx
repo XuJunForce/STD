@@ -4,28 +4,13 @@ const AppContext = createContext();
 
 // Mock/Default list of categories and tools in the system
 const INITIAL_CATEGORIES = [
-  { id: 'system', name: '系统状态', icon: '⚡' },
-  { id: 'text', name: '文本处理', icon: '📝' },
-  { id: 'dev', name: '开发辅助', icon: '🛠️' },
-  { id: 'graphics', name: '图像处理', icon: '🎨' }
+  { id: 'system', name: '系统状态', icon: '⚡' }
 ];
 
 const INITIAL_TOOLS = {
   system: [
     { id: 'status', name: '健康与状态', desc: '监测系统运行指标与微服务状态', icon: '📊' },
     { id: 'logs', name: '调用链追踪', desc: '红绿灰三色可视化埋点调用路径', icon: '👁️' }
-  ],
-  text: [
-    { id: 'regex', name: '正则测试', desc: '正则表达式在线匹配与捕获工具', icon: '🔍' },
-    { id: 'base64', name: 'Base64编解码', desc: '字符串与二进制文件Base64转换', icon: '🔑' }
-  ],
-  dev: [
-    { id: 'json', name: 'JSON格式化', desc: 'JSON字符串校验、美化与压缩', icon: '🏷️' },
-    { id: 'timestamp', name: '时间戳转换', desc: 'Unix时间戳与标准时间互转', icon: '⏰' }
-  ],
-  graphics: [
-    { id: 'compress', name: '图片压缩', desc: '在浏览器本地进行无损图片压缩', icon: '🖼️' },
-    { id: 'palette', name: '调色板', desc: '提取配色方案与色彩渐变生成器', icon: '🌈' }
   ]
 };
 

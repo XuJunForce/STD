@@ -2,6 +2,167 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useApp } from '../context/AppContext';
 import './IdCardScanner.css';
 
+/**
+ * 纯前端高性能身份证边缘与区域提取算法 (Sobel算子 + 投影密度分析)
+ * @param {HTMLImageElement} img 原始Image对象
+ * @returns {Object} { success: boolean, x: number, y: number, width: number, height: number }
+ */
+function detectIdCardRect(img) {
+  try {
+    const canvas = document.createElement('canvas');
+    // 使用降维处理，提升纯前端算法像素遍历的速度
+    const maxDim = 400;
+    let w = img.width;
+    let h = img.height;
+    if (w > maxDim || h > maxDim) {
+      if (w > h) {
+        h = Math.round((h * maxDim) / w);
+        w = maxDim;
+      } else {
+        w = Math.round((w * maxDim) / h);
+        h = maxDim;
+      }
+    }
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(img, 0, 0, w, h);
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+
+    // 1. 转为灰度图
+    const gray = new Uint8ClampedArray(w * h);
+    for (let i = 0; i < data.length; i += 4) {
+      // 标准灰度化公式
+      gray[i / 4] = Math.round(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
+    }
+
+    // 2. Sobel算子梯度滤波
+    const grad = new Float32Array(w * h);
+    let maxGrad = 0;
+    let sumGrad = 0;
+    for (let y = 1; y < h - 1; y++) {
+      for (let x = 1; x < w - 1; x++) {
+        const idx = y * w + x;
+        // x方向梯度
+        const gx =
+          gray[(y - 1) * w + x + 1] + 2 * gray[y * w + x + 1] + gray[(y + 1) * w + x + 1] -
+          (gray[(y - 1) * w + x - 1] + 2 * gray[y * w + x - 1] + gray[(y + 1) * w + x - 1]);
+        // y方向梯度
+        const gy =
+          gray[(y + 1) * w + x - 1] + 2 * gray[(y + 1) * w + x] + gray[(y + 1) * w + x + 1] -
+          (gray[(y - 1) * w + x - 1] + 2 * gray[(y - 1) * w + x] + gray[(y - 1) * w + x - 1]);
+        
+        const m = Math.sqrt(gx * gx + gy * gy);
+        grad[idx] = m;
+        sumGrad += m;
+        if (m > maxGrad) maxGrad = m;
+      }
+    }
+
+    const avgGrad = sumGrad / (w * h);
+    // 3. 自适应阈值二值化边缘
+    const threshold = Math.max(30, avgGrad + 0.25 * (maxGrad - avgGrad));
+    const edges = new Uint8Array(w * h);
+    for (let i = 0; i < w * h; i++) {
+      edges[i] = grad[i] > threshold ? 1 : 0;
+    }
+
+    // 4. 投影密度分析 (Projection Profiles)
+    const projX = new Float32Array(w);
+    const projY = new Float32Array(h);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (edges[y * w + x]) {
+          projX[x] += 1;
+          projY[y] += 1;
+        }
+      }
+    }
+
+    // 平滑滤波器以消除突变噪声
+    const smooth = (arr, windowSize = 7) => {
+      const result = new Float32Array(arr.length);
+      const half = Math.floor(windowSize / 2);
+      for (let i = 0; i < arr.length; i++) {
+        let sum = 0;
+        let count = 0;
+        for (let k = -half; k <= half; k++) {
+          const idx = i + k;
+          if (idx >= 0 && idx < arr.length) {
+            sum += arr[idx];
+            count++;
+          }
+        }
+        result[i] = sum / count;
+      }
+      return result;
+    };
+
+    const sProjX = smooth(projX, 9);
+    const sProjY = smooth(projY, 9);
+
+    // 寻找起止点：提取投影密度高于最大值12%且非边缘死角的连通区域
+    const findBoundaries = (proj, maxVal, minPct = 0.12) => {
+      const thresh = maxVal * minPct;
+      let start = 0;
+      let end = proj.length - 1;
+      const trimBorder = Math.floor(proj.length * 0.05);
+      for (let i = trimBorder; i < proj.length - trimBorder; i++) {
+        if (proj[i] > thresh) {
+          start = i;
+          break;
+        }
+      }
+      for (let i = proj.length - 1 - trimBorder; i >= trimBorder; i--) {
+        if (proj[i] > thresh) {
+          end = i;
+          break;
+        }
+      }
+      return { start, end };
+    };
+
+    const maxValX = Math.max(...sProjX);
+    const maxValY = Math.max(...sProjY);
+    
+    // 如果无显著边缘直接返回失败
+    if (maxValX < 3 || maxValY < 3) {
+      return { success: false };
+    }
+
+    const boundX = findBoundaries(sProjX, maxValX, 0.12);
+    const boundY = findBoundaries(sProjY, maxValY, 0.12);
+
+    const rectW = boundX.end - boundX.start;
+    const rectH = boundY.end - boundY.start;
+
+    // 5. 比例与合理性过滤
+    const ratio = rectW / rectH;
+    const areaPct = (rectW * rectH) / (w * h);
+
+    // 身份证物理比例为 1.58。合理识别比例区间为 [1.25, 1.95]
+    // 面积必须达到画布总面积的 12% 以上以防误判背景噪点
+    if (ratio >= 1.25 && ratio <= 1.95 && areaPct >= 0.12) {
+      // 还原到原始图片的绝对坐标
+      const scaleX = img.width / w;
+      const scaleY = img.height / h;
+      return {
+        success: true,
+        x: Math.round(boundX.start * scaleX),
+        y: Math.round(boundY.start * scaleY),
+        width: Math.round(rectW * scaleX),
+        height: Math.round(rectH * scaleY)
+      };
+    }
+
+    return { success: false };
+  } catch (e) {
+    console.error("ID card edge detection failed: ", e);
+    return { success: false };
+  }
+}
+
 export default function IdCardScanner() {
   const { sessionId, logFrontendAction } = useApp();
 
@@ -25,6 +186,10 @@ export default function IdCardScanner() {
   const [printScale, setPrintScale] = useState('1to1'); // 1to1 | fit
   const [fileName, setFileName] = useState('身份证复印件.pdf');
 
+  // 保存正反面各自动/手动微调的裁剪缩放与平移参数
+  const [frontCropParams, setFrontCropParams] = useState({ zoom: 1.0, offset: { x: 0, y: 0 } });
+  const [backCropParams, setBackCropParams] = useState({ zoom: 1.0, offset: { x: 0, y: 0 } });
+
   // 证件裁切相关状态
   const [cropModal, setCropModal] = useState({ isOpen: false, side: null, imgSrc: null });
   const [cropZoom, setCropZoom] = useState(1.0);
@@ -42,20 +207,27 @@ export default function IdCardScanner() {
   const backInputRef = useRef(null);
   const previewCanvasRef = useRef(null);
 
-  // 处理预览清理
+  // 处理正面预览清理
   useEffect(() => {
     return () => {
       if (frontPreview) URL.revokeObjectURL(frontPreview);
+    };
+  }, [frontPreview]);
+
+  // 处理反面预览清理
+  useEffect(() => {
+    return () => {
       if (backPreview) URL.revokeObjectURL(backPreview);
     };
-  }, [frontPreview, backPreview]);
+  }, [backPreview]);
 
   // 裁切模态框逻辑
   const openCropModal = (side, file) => {
+    const params = side === 'front' ? frontCropParams : backCropParams;
     const reader = new FileReader();
     reader.onload = () => {
-      setCropZoom(1.0);
-      setCropOffset({ x: 0, y: 0 });
+      setCropZoom(params.zoom);
+      setCropOffset({ x: params.offset.x, y: params.offset.y });
       setCropModal({
         isOpen: true,
         side,
@@ -99,6 +271,83 @@ export default function IdCardScanner() {
     });
   };
 
+  // 核心自动图像分析、边缘提取、参数重定位与自动裁剪流
+  const handleFileProcess = (file, side) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.src = reader.result;
+      img.onload = () => {
+        // 1. 调用边缘检测算法
+        const detection = detectIdCardRect(img);
+
+        const frameW = 380;
+        const frameH = 240;
+        const scaleToFit = Math.max(frameW / img.width, frameH / img.height);
+
+        let finalZoom = 1.0;
+        let finalOffset = { x: 0, y: 0 };
+
+        if (detection.success) {
+          // A. 成功识别：利用数学公式反算出让身份证正好完美铺满 frame 的 zoom 和 offset
+          const { x, y, width, height } = detection;
+          finalZoom = Math.min(3.0, Math.max(1.0, frameW / (width * scaleToFit)));
+          finalOffset = {
+            x: (img.width / 2 - (x + width / 2)) * scaleToFit * finalZoom,
+            y: (img.height / 2 - (y + height / 2)) * scaleToFit * finalZoom
+          };
+        } else {
+          // B. 识别失败：友好报警提示并降级为居中裁剪
+          alert(`💡 提示：未能自动识别出清晰的身份证边缘。
+请尽量上传“背景对比鲜明、光线均匀、四周无遮挡且平铺”的身份证原图。
+
+已自动为您居中裁剪，您可以点击图片上出现的“✂️ 裁切”按钮进行手动调整。`);
+          finalZoom = 1.0;
+          finalOffset = { x: 0, y: 0 };
+        }
+
+        // 保存大图以支持重新裁切，并保存计算所得的裁剪微调坐标
+        if (side === 'front') {
+          setFrontOriginal(file);
+          setFrontCropParams({ zoom: finalZoom, offset: finalOffset });
+        } else {
+          setBackOriginal(file);
+          setBackCropParams({ zoom: finalZoom, offset: finalOffset });
+        }
+
+        // 2. 在离屏 Canvas 中自动剪裁并导出
+        const canvas = document.createElement('canvas');
+        canvas.width = 856;
+        canvas.height = 540;
+        const ctx = canvas.getContext('2d');
+
+        const drawW = img.width * scaleToFit;
+        const drawH = img.height * scaleToFit;
+        const k = 856 / frameW;
+
+        const finalLeft = (frameW / 2 + finalOffset.x - (drawW * finalZoom) / 2) * k;
+        const finalTop = (frameH / 2 + finalOffset.y - (drawH * finalZoom) / 2) * k;
+        const finalW = drawW * finalZoom * k;
+        const finalH = drawH * finalZoom * k;
+
+        ctx.drawImage(img, finalLeft, finalTop, finalW, finalH);
+
+        canvas.toBlob((blob) => {
+          const croppedUrl = URL.createObjectURL(blob);
+          if (side === 'front') {
+            setFrontFile(new File([blob], "front_cropped.jpg", { type: "image/jpeg" }));
+            setFrontPreview(croppedUrl);
+          } else {
+            setBackFile(new File([blob], "back_cropped.jpg", { type: "image/jpeg" }));
+            setBackPreview(croppedUrl);
+          }
+          setGeneratedPdf(null);
+        }, 'image/jpeg', 0.95);
+      };
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSaveCrop = () => {
     const img = new Image();
     img.src = cropModal.imgSrc;
@@ -129,9 +378,11 @@ export default function IdCardScanner() {
         if (cropModal.side === 'front') {
           setFrontFile(new File([blob], "front_cropped.jpg", { type: "image/jpeg" }));
           setFrontPreview(croppedUrl);
+          setFrontCropParams({ zoom: cropZoom, offset: { x: cropOffset.x, y: cropOffset.y } });
         } else {
           setBackFile(new File([blob], "back_cropped.jpg", { type: "image/jpeg" }));
           setBackPreview(croppedUrl);
+          setBackCropParams({ zoom: cropZoom, offset: { x: cropOffset.x, y: cropOffset.y } });
         }
         setGeneratedPdf(null);
         setCropModal({ isOpen: false, side: null, imgSrc: null });
@@ -154,12 +405,7 @@ export default function IdCardScanner() {
       alert('请上传有效的图片文件！');
       return;
     }
-    if (side === 'front') {
-      setFrontOriginal(file);
-    } else {
-      setBackOriginal(file);
-    }
-    openCropModal(side, file);
+    handleFileProcess(file, side);
     e.target.value = ''; // 清空以保证同一个文件能够重复上传触发
   };
 
@@ -176,12 +422,7 @@ export default function IdCardScanner() {
       alert('请上传有效的图片文件！');
       return;
     }
-    if (side === 'front') {
-      setFrontOriginal(file);
-    } else {
-      setBackOriginal(file);
-    }
-    openCropModal(side, file);
+    handleFileProcess(file, side);
   };
 
   // 剪贴板粘贴
@@ -190,12 +431,7 @@ export default function IdCardScanner() {
     for (let i = 0; i < items.length; i++) {
       if (items[i].type.indexOf('image') !== -1) {
         const file = items[i].getAsFile();
-        if (side === 'front') {
-          setFrontOriginal(file);
-        } else {
-          setBackOriginal(file);
-        }
-        openCropModal(side, file);
+        handleFileProcess(file, side);
         break;
       }
     }
@@ -209,12 +445,14 @@ export default function IdCardScanner() {
       setFrontPreview('');
       setFrontOriginal(null);
       setFrontRotate(0);
+      setFrontCropParams({ zoom: 1.0, offset: { x: 0, y: 0 } });
     } else {
       if (backPreview) URL.revokeObjectURL(backPreview);
       setBackFile(null);
       setBackPreview('');
       setBackOriginal(null);
       setBackRotate(0);
+      setBackCropParams({ zoom: 1.0, offset: { x: 0, y: 0 } });
     }
     setGeneratedPdf(null);
   };
